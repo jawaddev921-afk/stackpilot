@@ -1,0 +1,645 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js" // TODO: Upgrade to use native js client in prisma 7
+}
+
+generator zod {
+  provider = "zod-prisma"
+  output   = "../src/shared/model/generated-zod" // (default) the directory where generated zod schemas will be saved
+
+  relationModel = true // (default) Create and export both plain and related models.
+  // relationModel         = "default" // Do not export model without relations.
+  // relationModel         = false // Do not generate related model
+
+  modelCase = "PascalCase" // (default) Output models using pascal case (ex. UserModel, PostModel)
+
+  modelSuffix = "Model" // (default) Suffix to apply to your prisma models when naming Zod schemas
+
+  // useDecimalJs          = false // (default) represent the prisma Decimal type using as a JS number
+  useDecimalJs = true // represent the prisma Decimal type using Decimal.js (as Prisma does)
+
+  imports = null // (default) will import the referenced file in generated schemas to be used via imports.someExportedVariable
+
+  // https://www.prisma.io/docs/concepts/components/prisma-client/working-with-fields/working-with-json-fields#filtering-by-null-values
+  prismaJsonNullability = true // (default) uses prisma's scheme for JSON field nullability
+  // prismaJsonNullability = false // allows null assignment to optional JSON fields
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// *** The following code is for the default NextAuth.js schema
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  password      String    @default("")
+  twoFaSecret   String?
+  twoFaEnabled  Boolean   @default(false)
+  apiOnlyUser   Boolean   @default(false)
+  image         String?
+
+  userGroupId String?
+  userGroup   UserGroup? @relation(fields: [userGroupId], references: [id])
+
+  accounts      Account[]
+  sessions      Session[]
+  restApiKeys   RestApiKey[]
+  // Optional for WebAuthn support
+  Authenticator Authenticator[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RestApiKey {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  keyHash   String    @unique
+  expiresAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, name])
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+// Optional for WebAuthn support
+
+model Authenticator {
+  credentialID         String  @unique
+  userId               String
+  providerAccountId    String
+  credentialPublicKey  String
+  counter              Int
+  credentialDeviceType String
+  credentialBackedUp   Boolean
+  transports           String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, credentialID])
+}
+
+// *** FROM HERE CUSTOM CLASSES
+
+model UserGroup {
+  id               String  @id @default(uuid())
+  name             String  @unique
+  description      String?
+  canAccessBackups Boolean @default(false)
+
+  users                  User[]
+  roleProjectPermissions RoleProjectPermission[]
+  ssoProviders           SsoProvider[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum SsoProviderType {
+  OIDC
+  GOOGLE
+  AZURE_AD
+  GITHUB
+}
+
+model SsoProvider {
+  id                 String          @id @default(uuid())
+  type               SsoProviderType
+  name               String
+  enabled            Boolean         @default(false)
+  clientId           String
+  clientSecretEnc    String
+  issuer             String?
+  tenantId           String?
+  defaultUserGroupId String
+  defaultUserGroup   UserGroup       @relation(fields: [defaultUserGroupId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([type, name])
+}
+
+model RoleProjectPermission {
+  id          String    @id @default(uuid())
+  userGroup   UserGroup @relation(fields: [userGroupId], references: [id], onDelete: Cascade)
+  userGroupId String
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String
+  createApps  Boolean   @default(false)
+  deleteApps  Boolean   @default(false)
+  writeApps   Boolean   @default(false)
+  readApps    Boolean   @default(false)
+
+  roleAppPermissions   RoleAppPermission[]
+  roleAgentPermissions RoleAgentPermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userGroupId, projectId])
+}
+
+model RoleAppPermission {
+  id                      String                 @id @default(uuid())
+  app                     App                    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  appId                   String
+  permission              String // READ, READWRITE
+  roleProjectPermission   RoleProjectPermission? @relation(fields: [roleProjectPermissionId], references: [id])
+  roleProjectPermissionId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([roleProjectPermissionId, appId])
+}
+
+model RoleAgentPermission {
+  id                      String                 @id @default(uuid())
+  agent                   Agent                  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId                 String
+  permission              String // READ, READWRITE
+  roleProjectPermission   RoleProjectPermission? @relation(fields: [roleProjectPermissionId], references: [id])
+  roleProjectPermissionId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([roleProjectPermissionId, agentId])
+}
+
+model Project {
+  id                     String                        @id @default(uuid())
+  name                   String
+  apps                   App[]
+  agents                 Agent[]
+  roleProjectPermissions RoleProjectPermission[]
+  networkGraphPositions  ProjectNetworkGraphPosition[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ProjectNetworkGraphPosition {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  nodeId    String
+  x         Float
+  y         Float
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, nodeId])
+}
+
+model LlmGateway {
+  id                String @id @default(uuid())
+  name              String
+  baseUrl           String
+  encryptedAdminKey String
+
+  agents Agent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Agent {
+  id           String     @id @default(uuid())
+  name         String
+  projectId    String
+  project      Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  llmGatewayId String
+  llmGateway   LlmGateway @relation(fields: [llmGatewayId], references: [id], onDelete: Restrict)
+  modelAlias   String
+
+  sourceType  String @default("CONTAINER") // GIT, GIT_SSH, CONTAINER
+  buildMethod String @default("DOCKERFILE") // DOCKERFILE
+
+  containerImageSource      String?
+  containerRegistryUsername String?
+  containerRegistryPassword String?
+
+  gitUrl         String?
+  gitBranch      String?
+  gitUsername    String?
+  gitToken       String?
+  dockerfilePath String  @default("./Dockerfile")
+
+  cpuRequest        Int?
+  cpuLimit          Int?
+  memoryRequest     Int?
+  memoryLimit       Int?
+  encryptedEnvVars  String?
+  containerCommand  String?
+  containerArgs     String?
+  workingDir        String?
+  runtimeClassName  String?
+  warmPoolReplicas  Int     @default(0)
+  deployFileBrowser Boolean @default(false)
+
+  // healthCheck startupProbe, readinessProbe, livenessProbe
+  healthChechHttpGetPath      String?
+  healthCheckHttpScheme       String? // HTTP, HTTPS
+  healthCheckHttpHeadersJson  String? // JSON stringified key-value pairs
+  healthCheckHttpPort         Int?
+  healthCheckPeriodSeconds    Int     @default(15)
+  healthCheckTimeoutSeconds   Int     @default(5)
+  healthCheckFailureThreshold Int     @default(3)
+
+  healthCheckTcpPort Int?
+
+  roleAgentPermissions  RoleAgentPermission[]
+  agentDomains          AgentDomain[]
+  agentVolumes          AgentVolume[]
+  agentFileMounts       AgentFileMount[]
+  agentGitSshKey        AgentGitSshKey?
+  agentNetworkPolicy    AgentNetworkPolicy?
+  appNetworkPolicyRules AppNetworkPolicyRule[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AgentNetworkPolicy {
+  id                  String  @id @default(uuid())
+  agentId             String  @unique
+  agent               Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  allowInternetAccess Boolean @default(true)
+
+  rules AgentNetworkPolicyRule[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AgentNetworkPolicyRule {
+  id                   String             @id @default(uuid())
+  agentNetworkPolicyId String
+  agentNetworkPolicy   AgentNetworkPolicy @relation(fields: [agentNetworkPolicyId], references: [id], onDelete: Cascade)
+  type                 String             @default("EGRESS") // EGRESS (always EGRESS for agents)
+  targetAppId          String
+  targetApp            App                @relation(fields: [targetAppId], references: [id], onDelete: Cascade)
+  port                 Int
+  protocol             String             @default("TCP") // TCP, UDP
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([agentNetworkPolicyId, targetAppId, port, protocol, type])
+}
+
+model AgentGitSshKey {
+  id                  String @id @default(uuid())
+  agentId             String @unique
+  agent               Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  publicKey           String
+  encryptedPrivateKey String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AgentDomain {
+  id            String  @id @default(uuid())
+  hostname      String
+  useSsl        Boolean @default(true)
+  redirectHttps Boolean @default(true)
+  port          Int
+  agentId       String
+  agent         Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([agentId, hostname])
+}
+
+model AgentVolume {
+  id                 String @id @default(uuid())
+  containerMountPath String
+  size               Int
+  volumeType         String @default("ALL")
+  accessMode         String @default("ReadWriteMany")
+  storageClassName   String @default("longhorn")
+  agentId            String
+  agent              Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([agentId, containerMountPath])
+}
+
+model AgentFileMount {
+  id                 String @id @default(uuid())
+  containerMountPath String
+  content            String
+  agentId            String
+  agent              Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([agentId, containerMountPath])
+}
+
+model App {
+  id          String  @id @default(uuid())
+  name        String
+  appType     String  @default("APP") // APP, POSTGRES, MYSQL, MONGO
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceType  String  @default("GIT") // GIT, GIT_SSH, CONTAINER
+  buildMethod String  @default("RAILPACK") // RAILPACK, DOCKERFILE
+
+  containerImageSource      String?
+  containerRegistryUsername String?
+  containerRegistryPassword String?
+  containerCommand          String? // Custom command to override container ENTRYPOINT
+  containerArgs             String? // Custom args to override container CMD (JSON array string)
+  securityContextRunAsUser  Int?
+  securityContextRunAsGroup Int?
+  securityContextFsGroup    Int?
+  securityContextPrivileged Boolean? @default(false)
+
+  gitUrl         String?
+  gitBranch      String?
+  gitUsername    String?
+  gitToken       String?
+  dockerfilePath String  @default("./Dockerfile")
+
+  // Framework build method (buildMethod = FRAMEWORK): Railpack with explicit install/build/start overrides.
+  framework       String?
+  installCommand  String?
+  buildCommand    String?
+  runCommand      String?
+  rootDirectory   String? @default("./")
+  outputDirectory String?
+  nodeVersion     String?
+
+  replicas  Int    @default(1)
+  envVars   String @default("")
+  buildArgs String @default("")
+
+  memoryReservation Int?
+  memoryLimit       Int?
+  cpuReservation    Int?
+  cpuLimit          Int?
+
+  webhookId String?
+
+  // Deprecated: Simple network policy configuration. Superseded by the extended AppNetworkPolicy
+  // (rules, allowInternetAccess). Kept only for the one-shot network-policy-to-extended migration
+  // and for existing rows; no longer read or written by application code. TODO: drop columns.
+  ingressNetworkPolicy String  @default("ALLOW_ALL") // ALLOW_ALL, NAMESPACE_ONLY, DENY_ALL, INTERNET_ONLY
+  egressNetworkPolicy  String  @default("ALLOW_ALL") // ALLOW_ALL, NAMESPACE_ONLY, DENY_ALL, INTERNET_ONLY
+  useNetworkPolicy     Boolean @default(true)
+  networkPolicyMode    String  @default("EXTENDED") // SIMPLE, EXTENDED
+
+  // healthCheck startupProbe, readinessProbe, livenessProbe
+  healthChechHttpGetPath      String?
+  healthCheckHttpScheme       String? // HTTP, HTTPS
+  healthCheckHttpHeadersJson  String? // JSON stringified key-value pairs
+  healthCheckHttpPort         Int?
+  healthCheckPeriodSeconds    Int     @default(15)
+  healthCheckTimeoutSeconds   Int     @default(5)
+  healthCheckFailureThreshold Int     @default(3)
+
+  healthCheckTcpPort Int?
+
+  appDomains         AppDomain[]
+  appPorts           AppPort[]
+  appNodePorts       AppNodePort[]
+  appVolumes         AppVolume[]
+  appFileMounts      AppFileMount[]
+  appBasicAuths      AppBasicAuth[]
+  appGitSshKey       AppGitSshKey?
+  appNetworkPolicy   AppNetworkPolicy?
+  roleAppPermissions RoleAppPermission[]
+
+  agentNetworkPolicyRules AgentNetworkPolicyRule[]
+  appNetworkPolicyRules   AppNetworkPolicyRule[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AppNetworkPolicy {
+  id                  String  @id @default(uuid())
+  appId               String  @unique
+  app                 App     @relation(fields: [appId], references: [id], onDelete: Cascade)
+  allowInternetAccess Boolean @default(true)
+
+  rules AppNetworkPolicyRule[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AppNetworkPolicyRule {
+  id                 String           @id @default(uuid())
+  appNetworkPolicyId String
+  appNetworkPolicy   AppNetworkPolicy @relation(fields: [appNetworkPolicyId], references: [id], onDelete: Cascade)
+  type               String // INGRESS, EGRESS
+  targetAppId        String?
+  targetApp          App?             @relation(fields: [targetAppId], references: [id], onDelete: Cascade)
+  targetAgentId      String?
+  targetAgent        Agent?           @relation(fields: [targetAgentId], references: [id], onDelete: Cascade)
+  port               Int
+  protocol           String           @default("TCP") // TCP, UDP
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([appNetworkPolicyId, targetAppId, port, protocol, type])
+  @@unique([appNetworkPolicyId, targetAgentId, port, protocol, type])
+}
+
+model AppGitSshKey {
+  id                  String @id @default(uuid())
+  appId               String @unique
+  app                 App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  publicKey           String
+  encryptedPrivateKey String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AppPort {
+  id    String @id @default(uuid())
+  appId String
+  app   App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  port  Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([appId, port])
+}
+
+model AppNodePort {
+  id       String @id @default(uuid())
+  appId    String
+  app      App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  port     Int
+  nodePort Int
+  protocol String @default("TCP")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([nodePort])
+}
+
+model AppDomain {
+  id            String  @id @default(uuid())
+  hostname      String  @unique
+  port          Int
+  useSsl        Boolean @default(true)
+  redirectHttps Boolean @default(true)
+  appId         String
+  app           App     @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AppVolume {
+  id                 String         @id @default(uuid())
+  containerMountPath String
+  size               Int
+  accessMode         String         @default("rwo")
+  storageClassName   String         @default("longhorn")
+  shareWithOtherApps Boolean        @default(false)
+  sharedVolumeId     String?
+  appId              String
+  app                App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  volumeBackups      VolumeBackup[]
+  sharedVolume       AppVolume?     @relation("SharedVolume", fields: [sharedVolumeId], references: [id], onDelete: Cascade)
+  sharedVolumes      AppVolume[]    @relation("SharedVolume")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([appId, containerMountPath])
+}
+
+model AppFileMount {
+  id                 String @id @default(uuid())
+  containerMountPath String
+  content            String
+  appId              String
+  app                App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([appId, containerMountPath])
+}
+
+model Parameter {
+  name  String @id
+  value String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model S3Target {
+  id                 String         @id @default(uuid())
+  name               String
+  bucketName         String
+  endpoint           String
+  region             String
+  accessKeyId        String
+  secretKey          String
+  v4Auth             Boolean        @default(true) // use AWS Signature Version 4 (registry storage `v4auth`)
+  forcePathStyle     Boolean        @default(false) // use path-style S3 addressing (registry storage `forcepathstyle`)
+  useSinglePutObject Boolean        @default(false) // upload backups with a single PutObject request instead of multipart
+  volumeBackups      VolumeBackup[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model VolumeBackup {
+  id                     String    @id @default(uuid())
+  volumeId               String
+  volume                 AppVolume @relation(fields: [volumeId], references: [id], onDelete: Cascade)
+  targetId               String
+  target                 S3Target  @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  cron                   String
+  retention              Int
+  useDatabaseBackup      Boolean   @default(false) // decides wether backup whole volume or make a dump of the databse (only for database volumes)
+  backupBeforeDeployment Boolean   @default(false) // run this backup automatically before a deployment is applied
+  failSilently           Boolean   @default(false) // continue the deployment even if this backup fails
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AppBasicAuth {
+  id       String @id @default(uuid())
+  username String
+  password String
+  appId    String
+  app      App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
