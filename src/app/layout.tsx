@@ -1,0 +1,74 @@
+import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import { cn } from "@/frontend/utils/utils"
+import { Toaster } from "@/components/ui/sonner"
+import "./globals.css";
+import { Suspense } from "react";
+import FullLoadingSpinner from "@/components/ui/full-loading-spinnter";
+import { ConfirmDialog } from "@/components/custom/confirm-dialog";
+import { SidebarProvider } from "@/components/ui/sidebar"
+import { AppSidebar } from "./sidebar";
+import { cookies } from "next/headers";
+import { BreadcrumbsGenerator } from "../components/custom/breadcrumbs-generator";
+import { getUserSession } from "@/server/utils/action-wrapper.utils";
+import { InputDialog } from "@/components/custom/input-dialog";
+import PodsStatusPollingProvider from "@/components/custom/pods-status-polling-provider";
+import BuildStatusPollingProvider from "@/components/custom/build-status-polling-provider";
+import { GenericDialog } from "@/components/custom/generic-dialog";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-sans",
+});
+
+export const metadata: Metadata = {
+  title: "StackPilot",
+  description: "", // todo
+  icons: [
+    { rel: "favicon", url: "/stackpilot-icon.png" },
+    { rel: "icon", url: "/stackpilot-icon.png" },
+    { rel: "apple-touch-icon", url: "/stackpilot-icon.png" }
+  ],
+};
+
+export default async function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  const cookieStore = await cookies()
+  const cookieSidebarState = cookieStore.get("sidebar_state")?.value ?? 'true';
+  const defaultOpen = cookieSidebarState === "true";
+  const session = await getUserSession();
+  const userIsLoggedIn = !!session;
+
+  return (
+    <html lang="en">
+      <body className={cn(
+        "min-h-screen bg-background font-sans antialiased",
+        inter.variable
+      )}>
+        <SidebarProvider defaultOpen={defaultOpen}>
+          <AppSidebar />
+          <main className="flex min-w-0 flex-1 flex-col items-center">
+            <div className="w-full min-w-0 max-w-8xl px-2 has-[[data-project-network-graph]]:max-w-none lg:px-4">
+              <div className="min-w-0 flex-col p-6 md:flex has-[[data-project-network-graph]]:pb-0">
+                {userIsLoggedIn && <BreadcrumbsGenerator />}
+                <Suspense fallback={<FullLoadingSpinner />}>
+                  {children}
+                </Suspense>
+              </div>
+            </div>
+          </main>
+        </SidebarProvider>
+
+        <Toaster />
+        <ConfirmDialog />
+        <InputDialog />
+        <GenericDialog />
+        {userIsLoggedIn && <PodsStatusPollingProvider />}
+        {userIsLoggedIn && <BuildStatusPollingProvider />}
+      </body>
+    </html>
+  );
+}
