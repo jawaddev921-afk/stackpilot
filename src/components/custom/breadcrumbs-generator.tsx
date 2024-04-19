@@ -1,0 +1,58 @@
+'use client'
+
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import {
+    SidebarTrigger
+} from "@/components/ui/sidebar"
+import { ChevronDown } from "lucide-react"
+import Link from "next/link"
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
+import { useBreadcrumbs } from "@/frontend/states/zustand.states"
+import { Separator } from "../ui/separator"
+import { Fragment } from "react"
+
+export function BreadcrumbsGenerator() {
+
+    const { breadcrumbs } = useBreadcrumbs();
+
+    return (<>
+        <div className="-ml-1 flex gap-4 items-center fixed w-full top-0 bg-white pt-6 pb-4 z-50">
+            <SidebarTrigger />
+            <Separator orientation="vertical" className="mr-1 h-4" />
+            {breadcrumbs && <Breadcrumb>
+                <BreadcrumbList>
+                    {breadcrumbs.map((x, index) => (<Fragment key={x.name}>
+                        {index > 0 && <BreadcrumbSeparator />}
+                        <BreadcrumbItem key={x.name}>
+                            {x.dropdownItems ? (
+                                <DropdownMenu>
+                                    <DropdownMenuTrigger className="flex items-center gap-1 transition-colors hover:text-foreground">
+                                        {x.name}
+                                        <ChevronDown size={14} />
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="start">
+                                        {x.dropdownItems.map((item) => (
+                                            item.active ? (
+                                                <DropdownMenuItem key={item.url} disabled>
+                                                    {item.name}
+                                                </DropdownMenuItem>
+                                            ) : (
+                                                <DropdownMenuItem key={item.url} render={<Link href={item.url}>{item.name}</Link>} />
+                                            )
+                                        ))}
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            ) : (
+                                <BreadcrumbLink href={x.url ?? undefined}>{x.name}</BreadcrumbLink>
+                            )}
+                        </BreadcrumbItem>
+                    </Fragment>))}
+                </BreadcrumbList>
+            </Breadcrumb>}
+        </div>
+        <div className="h-[32px]">
+            <div></div>
+        </div>
+    </>
+    )
+}
