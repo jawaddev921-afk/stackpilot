@@ -1,0 +1,90 @@
+"use client"
+
+import * as React from "react"
+
+import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { FieldValues, UseFormReturn } from "react-hook-form"
+import { FormControl, FormField, FormItem, FormLabel } from "../ui/form"
+import { Input } from "../ui/input"
+import { ScrollArea } from "../ui/scroll-area"
+
+export function MultiselectDropdownField<TFormType extends FieldValues>(
+  {
+    form,
+    label,
+    name,
+    options
+  }: {
+    form: UseFormReturn<TFormType, any, TFormType>,
+    label: string | React.ReactNode,
+    name: keyof TFormType
+    options: string[]
+  }
+) {
+
+  const [values, setValues] = React.useState<Map<string, boolean>>(new Map<string, boolean>())
+
+
+  React.useEffect(() => {
+    const values = form.getValues();
+    const fieldValue = values[name] as string;
+    const selectedValue = (fieldValue || "").split(",");
+    const selectedOptions = new Map<string, boolean>()
+    for (const option of options) {
+      selectedOptions.set(option, selectedValue.includes(option))
+    }
+    setValues(selectedOptions);
+  }, [form, options, name]);
+
+
+
+  return <>
+    <div className="hidden">
+      <FormField
+        control={form.control}
+        name={name as any}
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>id</FormLabel>
+            <FormControl>
+              <Input {...field} />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+    </div>
+    <DropdownMenu>
+      <DropdownMenuTrigger render={<Button variant="outline">{!(form.getValues()[name] as string) || (form.getValues()[name] as string).length === 0 ? label : (form.getValues()[name] as string)?.replaceAll(',', ', ')}</Button>} />
+      <DropdownMenuContent className="w-56">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Kantone</DropdownMenuLabel>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <ScrollArea className="h-60">
+          {Array.from(values.keys()).map((key) => {
+            return <DropdownMenuCheckboxItem
+              key={key}
+              checked={values.get(key)}
+              onCheckedChange={(checked) => {
+                setValues(new Map(values.set(key, checked)));
+                const value = Array.from(values.entries()).filter((entry) => entry[1]).map(([key]) => key).join(",");
+                form.setValue(name as any, value as any);
+              }}
+            >
+              {key}
+            </DropdownMenuCheckboxItem>
+          })}
+        </ScrollArea>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  </>;
+}
