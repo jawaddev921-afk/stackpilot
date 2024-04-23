@@ -1,0 +1,181 @@
+'use server'
+
+import { SuccessActionResult } from "@/shared/model/server-action-error-return.model";
+import { z } from "zod";
+import appService from "@/server/services/app.service";
+import { getAuthUserSession, isAuthorizedDeleteForProject, saveFormAction, simpleAction } from "@/server/utils/action-wrapper.utils";
+import appTemplateService from "@/server/services/app-template.service";
+import { AppTemplateModel, appTemplateZodModel } from "@/shared/model/app-template.model";
+import { ServiceException } from "@/shared/model/service.exception.model";
+import dbGateService from "@/server/services/db-tool-services/dbgate.service";
+import fileBrowserService from "@/server/services/file-browser-service";
+import phpMyAdminService from "@/server/services/db-tool-services/phpmyadmin.service";
+import pgAdminService from "@/server/services/db-tool-services/pgadmin.service";
+import {
+    ensureCreateProjectWorkloadInProject,
+    ensureDeleteProjectWorkloadInProject,
+    ensureWriteProject,
+    RequesterIdentity,
+} from "@/server/utils/shared-authorization.utils";
+import agentService from "@/server/services/agent.service";
+import llmGatewayService from "@/server/services/llm-gateway.service";
+import agentTemplateService from "@/server/services/agent-template.service";
+import { AgentTemplateModel, agentTemplateZodModel } from "@/shared/model/agent-template.model";
+import { RenameAgentModel, renameAgentZodModel } from "@/shared/model/rename-agent.model";
+import projectNetworkGraphLayoutService from '@/server/services/project-network-graph-layout.service';
+import { projectNetworkGraphPositionSchema } from '@/shared/model/project-network-graph-layout.model';
+import paramService, { ParamService } from '@/server/services/param.service';
+import agentSandboxAddonService from '@/server/services/addons/agent-sandbox-addon.service';
+
+export const acknowledgeNewNetworkPolicyExplanation = async () => simpleAction(async () => {
+    await getAuthUserSession();
+    await paramService.save({
+        name: ParamService.FEATURE_NEW_NETWORK_POLICY_EXPLENATION,
+        value: 'true',
+    });
+});
+
+const createAppSchema = z.object({
+    appName: z.string().min(1)
+});
+
+const createAgentSchema = z.object({
+    agentName: z.string().min(1),
+    llmGatewayId: z.string().min(1),
+    modelAlias: z.array(z.string().min(1)).min(1),
+});
+
+async function ensureAgentSandboxAddonAvailable() {
+    if (!await agentSandboxAddonService.isAvailable()) {
+        throw new ServiceException('The Agent Sandbox Add-on is not available.');
+    }
+}
+
+export const createApp = async (appName: string, projectId: string, appId?: string) =>
+    saveFormAction({ appName }, createAppSchema, async (validatedData) => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        ensureCreateProjectWorkloadInProject(identity, projectId);
+
+        const returnData = await appService.save({
+            id: appId ?? undefined,
+            name: validatedData.appName,
+            projectId
+        });
+
+        return new SuccessActionResult(returnData, "Saved successfully.");
+    });
+
+export const createAppFromTemplate = async (prevState: any, inputData: AppTemplateModel, projectId: string) =>
+    saveFormAction(inputData, appTemplateZodModel, async (validatedData) => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        ensureCreateProjectWorkloadInProject(identity, projectId);
+        if (validatedData.templates.some(x => x.inputSettings.some(y => !y.randomGeneratedIfEmpty && !y.value))) {
+            throw new ServiceException('Please fill out all required fields.');
+        }
+        await appTemplateService.createAppFromTemplate(projectId, validatedData);
+    });
+
+export const createAgentFromTemplate = async (prevState: any, inputData: AgentTemplateModel, projectId: string) =>
+    saveFormAction(inputData, agentTemplateZodModel, async (validatedData) => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        ensureCreateProjectWorkloadInProject(identity, projectId);
+        await ensureAgentSandboxAddonAvailable();
+        if (validatedData.templates.some(x => x.inputSettings.some(y => !y.randomGeneratedIfEmpty && !y.value))) {
+            throw new ServiceException('Please fill out all required fields.');
+        }
+        if (validatedData.templates.some(x => !x.llmGatewayId || !x.modelAlias?.length)) {
+            throw new ServiceException('Please select an LLM Gateway and model alias for each Agent.');
+        }
+        await agentTemplateService.createAgentFromTemplate(projectId, validatedData);
+    });
+
+export const createAgent = async (agentName: string, projectId: string, llmGatewayId: string, modelAlias: string[]) =>
+    saveFormAction({ agentName, llmGatewayId, modelAlias }, createAgentSchema, async (validatedData) => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        ensureCreateProjectWorkloadInProject(identity, projectId);
+        await ensureAgentSandboxAddonAvailable();
+
+        const returnData = await agentService.saveAgent({
+            name: validatedData.agentName,
+            projectId,
+            llmGatewayId: validatedData.llmGatewayId,
+            modelAlias: validatedData.modelAlias,
+        });
+
+        return new SuccessActionResult(returnData, 'Agent created successfully.');
+    });
+
+export const renameAgent = async (_prevState: unknown, inputData: RenameAgentModel, agentId: string) =>
+    saveFormAction(inputData, renameAgentZodModel, async (validatedData) => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        const agent = await agentService.getById(agentId);
+        ensureCreateProjectWorkloadInProject(identity, agent.projectId);
+
+        const returnData = await agentService.saveAgent({
+            id: agent.id,
+            name: validatedData.name,
+        });
+
+        return new SuccessActionResult(returnData, 'Agent renamed successfully.');
+    });
+
+export const getLlmGateways = async () =>
+    simpleAction(async () => {
+        await getAuthUserSession();
+        return await llmGatewayService.getAll();
+    });
+
+export const getModelAliasesForGateway = async (gatewayId: string) =>
+    simpleAction(async () => {
+        await getAuthUserSession();
+        return await llmGatewayService.getModelAliasesById(gatewayId);
+    });
+
+export const saveProjectNetworkGraphPosition = async (projectId: string, input: unknown) =>
+    simpleAction(async () => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        ensureWriteProject(identity, projectId);
+        const position = projectNetworkGraphPositionSchema.safeParse(input);
+        if (!position.success) {
+            throw new ServiceException('Invalid network graph position.');
+        }
+        await projectNetworkGraphLayoutService.savePosition(projectId, position.data);
+    });
+
+export const resetProjectNetworkGraphLayout = async (projectId: string) =>
+    simpleAction(async () => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        ensureWriteProject(identity, projectId);
+        await projectNetworkGraphLayoutService.resetPositions(projectId);
+    });
+
+export const deleteApp = async (appId: string) =>
+    simpleAction(async () => {
+        const session = await getAuthUserSession();
+        const identity: RequesterIdentity = { type: 'session', session };
+        const app = await appService.getExtendedById(appId);
+        ensureDeleteProjectWorkloadInProject(identity, app.projectId);
+        // First delete external services wich might be running
+        await dbGateService.deleteToolForAppIfExists(appId);
+        await phpMyAdminService.deleteToolForAppIfExists(appId);
+        await pgAdminService.deleteToolForAppIfExists(appId);
+        for (const volume of app.appVolumes) {
+            await fileBrowserService.deleteFileBrowserForVolumeIfExists(volume.id);
+        }
+        // delete the app drom database and all kubernetes objects
+        await appService.deleteById(appId);
+    });
+
+export const deleteAgent = async (agentId: string) =>
+    simpleAction(async () => {
+        const agent = await agentService.getById(agentId);
+        await isAuthorizedDeleteForProject(agent.projectId);
+        await agentService.deleteById(agentId);
+    });
