@@ -1,0 +1,848 @@
+import { revalidateTag, unstable_cache } from "next/cache";
+import dataAccess from "../adapter/db.client";
+import { Tags } from "../utils/cache-tag-generator.utils";
+import { App, AppBasicAuth, AppDomain, AppFileMount, AppNodePort, AppVolume, Prisma } from "@prisma/client";
+import { AppExtendedModel, AppExtendedWriteModel } from "@/shared/model/app-extended.model";
+import { ServiceException } from "@/shared/model/service.exception.model";
+import { KubeObjectNameUtils } from "../utils/kube-object-name.utils";
+import deploymentService from "./deployment.service";
+import buildService from "./build.service";
+import registryService from "./registry.service";
+import ingressService from "./ingress.service";
+import pvcService from "./pvc.service";
+import svcService from "./svc.service";
+import deploymentLogService, { dlog } from "./deployment-logs.service";
+import crypto from "crypto";
+import networkPolicyService from "./network-policy.service";
+import appNetworkPolicyService from "./app-network-policy.service";
+import { AppBasicAuthModel, AppDomainModel, AppFileMountModel, AppModel, AppNodePortModel, AppVolumeModel } from "@/shared/model/generated-zod";
+import { z } from "zod";
+import { GitHashUtils } from "@/shared/utils/git-hash.utils";
+import { AppBuildMethodUtils } from "@/shared/utils/app-build-method.utils";
+
+class AppService {
+
+    async buildAndDeploy(appId: string, forceBuild: boolean = false) {
+        const deploymentId = crypto.randomUUID();
+        await deploymentLogService.catchErrosAndLog(deploymentId, async () => {
+            const app = await this.getExtendedById(appId);
+
+            await dlog(deploymentId, `
+-----------------------------------------------
+ Deployment:   ${deploymentId}
+ App:          ${app.id}
+ Project:      ${app.projectId}
+-----------------------------------------------`, false);
+
+            if (app.sourceType === 'GIT' || app.sourceType === 'GIT_SSH') {
+                // first make build
+                const [buildJobName, gitCommitHash, gitCommitMessage, shouldDeployImmediately] = await buildService.buildApp(deploymentId, app, forceBuild);
+                if (shouldDeployImmediately) {
+                    dlog(deploymentId, `Starting deployment with output from build "${buildJobName}"`);
+                    await deploymentService.createDeployment(deploymentId, app, {
+                        buildJobName,
+                        gitCommitHash,
+                        gitCommitMessage,
+                        buildMethod: AppBuildMethodUtils.normalize(app.buildMethod),
+                    });
+                }
+                // Otherwise the build-watch service will trigger the deployment once the build job completes
+            } else {
+                // only deploy
+                await deploymentService.createDeployment(deploymentId, app);
+            }
+        });
+        return deploymentId;
+    }
+
+    async rollbackToDeployment(appId: string, targetDeploymentId: string) {
+        const deploymentId = crypto.randomUUID();
+        await deploymentLogService.catchErrosAndLog(deploymentId, async () => {
+            const app = await this.getExtendedById(appId);
+
+            const target = await deploymentService.getDeploymentHistoryEntryById(app.projectId, appId, targetDeploymentId);
+            if (!target) {
+                throw new ServiceException('The selected deployment could not be found.');
+            }
+
+            const gitCommit = target.gitCommit;
+            if (!gitCommit) {
+                throw new ServiceException('The selected deployment has no git commit to roll back to.');
+            }
+
+            await dlog(deploymentId, `
+----------------------------------------------
+ Rollback:     ${deploymentId}
+ App:          ${app.id}
+ Project:      ${app.projectId}
+ Target:       ${gitCommit}
+----------------------------------------------`, false);
+
+            const tag = GitHashUtils.shortGitHash(gitCommit);
+            if (tag && await registryService.doesImageExist(app.id, tag)) {
+                await dlog(deploymentId, `Image for commit ${gitCommit} already exists in the registry, redeploying it.`);
+                await deploymentService.createDeployment(deploymentId, app, {
+                    gitCommitHash: gitCommit,
+                    gitCommitMessage: target.gitCommitMessage,
+                    buildMethod: target.buildMethod,
+                    isRollback: true,
+                });
+            } else {
+                await dlog(deploymentId, `Image for commit ${gitCommit} not found in the registry, starting a new build.`);
+                await buildService.buildAppAtCommit(deploymentId, app, {
+                    gitCommitHash: gitCommit,
+                    gitCommitMessage: target.gitCommitMessage,
+                    isRollback: true,
+                });
+            }
+        });
+        return deploymentId;
+    }
+
+    async deleteById(id: string) {
+        const existingApp = await this.getById(id);
+        if (!existingApp) {
+            return;
+        }
+        try {
+            await svcService.deleteService(existingApp.projectId, existingApp.id);
+            await deploymentService.deleteDeploymentIfExists(existingApp.projectId, existingApp.id);
+            await ingressService.deleteAllIngressForApp(existingApp.projectId, existingApp.id);
+            await pvcService.deleteAllPvcOfApp(existingApp.projectId, existingApp.id);
+            await buildService.deleteAllBuildsOfApp(existingApp.id);
+            await networkPolicyService.deleteNetworkPolicy(existingApp.id, existingApp.projectId);
+            await dataAccess.client.app.delete({
+                where: {
+                    id
+                }
+            });
+        } finally {
+            revalidateTag(Tags.apps(existingApp.projectId));
+            revalidateTag(Tags.app(existingApp.id));
+            revalidateTag(Tags.projects());
+            revalidateTag(Tags.userGroups());
+            revalidateTag(Tags.users());
+        }
+    }
+
+    async getAllAppsByProjectId(projectId: string): Promise<AppExtendedModel[]> {
+        return await unstable_cache(async (projectId: string) => await dataAccess.client.app.findMany({
+            where: {
+                projectId
+            },
+            include: {
+                appDomains: true,
+                appNodePorts: true,
+                appFileMounts: true,
+                appVolumes: true,
+                appBasicAuths: true,
+                appNetworkPolicy: {
+                    include: {
+                        rules: {
+                            include: {
+                                targetApp: {
+                                    select: {
+                                        id: true,
+                                        name: true,
+                                        projectId: true
+                                    }
+                                },
+                                targetAgent: {
+                                    select: {
+                                        id: true,
+                                        name: true,
+                                        projectId: true
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                project: true
+            },
+            orderBy: {
+                name: 'asc'
+            }
+        }),
+            [Tags.apps(projectId)], {
+            tags: [Tags.apps(projectId)]
+        })(projectId as string);
+    }
+
+    async getExtendedById(appId: string, cached = true, tx?: Prisma.TransactionClient): Promise<AppExtendedModel> {
+        const include = {
+            project: true,
+            appDomains: true,
+            appVolumes: true,
+            appNodePorts: true,
+            appFileMounts: true,
+            appBasicAuths: true,
+            appNetworkPolicy: { include: { rules: { include: { targetApp: { select: { id: true, name: true, projectId: true } }, targetAgent: { select: { id: true, name: true, projectId: true } } } } } },
+        };
+
+        const client = tx || dataAccess.client;
+        if (cached) {
+            return await unstable_cache(async (id: string) => await client.app.findFirstOrThrow({
+                where: {
+                    id
+                },
+                include
+            }),
+                [Tags.app(appId)], {
+                tags: [Tags.app(appId)]
+            })(appId);
+        } else {
+            return await client.app.findFirstOrThrow({
+                where: {
+                    id: appId
+                }, include
+            });
+        }
+    }
+
+    async getById(appId: string) {
+        return await unstable_cache(async (id: string) => await dataAccess.client.app.findFirstOrThrow({
+            where: {
+                id
+            }
+        }),
+            [Tags.app(appId)], {
+            tags: [Tags.app(appId)]
+        })(appId);
+    }
+
+    async getByIdOrUndefined(appId: string) {
+        return await unstable_cache(async (id: string) => await dataAccess.client.app.findFirst({
+            where: {
+                id
+            }
+        }),
+            [Tags.app(appId)], {
+            tags: [Tags.app(appId)]
+        })(appId);
+    }
+
+    async getByWebhookId(webhookId: string) {
+        return await dataAccess.client.app.findFirstOrThrow({
+            where: {
+                webhookId
+            }
+        });
+    }
+
+    async save(item: Prisma.AppUncheckedCreateInput | Prisma.AppUncheckedUpdateInput, tx?: Prisma.TransactionClient) {
+        let savedItem: App;
+        const client = tx || dataAccess.client;
+        try {
+            if (item.id) {
+                savedItem = await client.app.update({
+                    where: {
+                        id: item.id as string
+                    },
+                    data: item
+                });
+            } else {
+                item.id = KubeObjectNameUtils.toAppId(item.name as string);
+                savedItem = await client.app.create({
+                    data: item as Prisma.AppUncheckedCreateInput
+                });
+            }
+        } finally {
+            if (!tx) {
+                revalidateTag(Tags.apps(item.projectId as string));
+                revalidateTag(Tags.app(item.id as string));
+                revalidateTag(Tags.projects());
+                revalidateTag(Tags.userGroups());
+                revalidateTag(Tags.users());
+            }
+        }
+        return savedItem;
+    }
+
+    async saveAppExtendedModel(app: AppExtendedWriteModel, tx?: Prisma.TransactionClient): Promise<AppExtendedModel> {
+        const run = async (innerTx: Prisma.TransactionClient) => {
+            // for new objects, make sure some params are optional, wich will be created by prisma
+            const optionalParam = z.object({
+                id: z.string().optional(),
+                appId: z.string().optional(),
+                createdAt: z.date().optional(),
+                updatedAt: z.date().optional(),
+            });
+
+            const parsedAppModel = AppModel.extend(optionalParam.shape).omit({
+                ingressNetworkPolicy: true,
+                egressNetworkPolicy: true,
+                networkPolicyMode: true,
+            }).parse(app);
+            const savedApp = await this.save({
+                ...parsedAppModel,
+                id: app.id
+            }, innerTx);
+
+            const savedAppId = savedApp.id;
+
+            const parsedDomains = AppDomainModel.extend(optionalParam.shape).array().parse(app.appDomains);
+            await innerTx.appDomain.deleteMany({
+                where: { appId: savedAppId, id: { notIn: parsedDomains.flatMap(domain => domain.id ? [domain.id] : []) } },
+            });
+            for (const domain of parsedDomains) {
+                await this.saveDomain({
+                    ...domain,
+                    appId: savedAppId
+                }, innerTx);
+            }
+
+            const parsedVolumes = AppVolumeModel.extend(optionalParam.shape).array().parse(app.appVolumes);
+            await innerTx.appVolume.deleteMany({
+                where: { appId: savedAppId, id: { notIn: parsedVolumes.flatMap(volume => volume.id ? [volume.id] : []) } },
+            });
+            for (const volume of parsedVolumes) {
+                await this.saveVolume({
+                    ...volume,
+                    appId: savedAppId
+                }, innerTx);
+            }
+
+            const parsedFileMounts = AppFileMountModel.extend(optionalParam.shape).array().parse(app.appFileMounts);
+            await innerTx.appFileMount.deleteMany({
+                where: { appId: savedAppId, id: { notIn: parsedFileMounts.flatMap(fileMount => fileMount.id ? [fileMount.id] : []) } },
+            });
+            for (const fileMount of parsedFileMounts) {
+                await this.saveFileMount({
+                    ...fileMount,
+                    appId: savedAppId
+                }, innerTx);
+            }
+
+            const parsedNodePorts = AppNodePortModel.extend(optionalParam.shape).array().parse(app.appNodePorts);
+            await innerTx.appNodePort.deleteMany({
+                where: { appId: savedAppId, id: { notIn: parsedNodePorts.flatMap(nodePort => nodePort.id ? [nodePort.id] : []) } },
+            });
+            for (const nodePort of parsedNodePorts) {
+                await this.saveNodePort({
+                    ...nodePort,
+                    appId: savedAppId
+                }, innerTx);
+            }
+
+            const parsedBasicAuths = AppBasicAuthModel.extend(optionalParam.shape).array().parse(app.appBasicAuths);
+            await innerTx.appBasicAuth.deleteMany({
+                where: { appId: savedAppId, id: { notIn: parsedBasicAuths.flatMap(basicAuth => basicAuth.id ? [basicAuth.id] : []) } },
+            });
+            for (const basicAuth of parsedBasicAuths) {
+                await this.saveBasicAuth({
+                    ...basicAuth,
+                    appId: savedAppId
+                }, innerTx);
+            }
+
+            await appNetworkPolicyService.replaceConfiguration(innerTx, savedAppId, app.appNetworkPolicy);
+
+            return await this.getExtendedById(savedAppId, false, innerTx);
+        };
+
+        if (tx) {
+            return await run(tx);
+        }
+
+        const result = await dataAccess.client.$transaction(async (innerTx) => {
+            return await run(innerTx);
+        });
+
+        revalidateTag(Tags.apps(result.projectId));
+        revalidateTag(Tags.app(result.id));
+        revalidateTag(Tags.projects());
+        revalidateTag(Tags.userGroups());
+        revalidateTag(Tags.users());
+        return result;
+    }
+
+    async regenerateWebhookId(appId: string) {
+        const existingApp = await this.getById(appId);
+
+        const randomBytes = crypto.randomBytes(32).toString('hex');
+        await this.save({
+            ...existingApp,
+            webhookId: randomBytes
+        });
+        return randomBytes;
+    }
+
+    async saveDomain(domainToBeSaved: Prisma.AppDomainUncheckedCreateInput | Prisma.AppDomainUncheckedUpdateInput, tx?: Prisma.TransactionClient) {
+        let savedItem: AppDomain;
+        const client = tx || dataAccess.client;
+        const existingApp = await this.getExtendedById(domainToBeSaved.appId as string, false, client);
+        const existingDomainWithSameHostname = await client.appDomain.findFirst({
+            where: {
+                hostname: domainToBeSaved.hostname as string,
+            }
+        });
+        try {
+            if (domainToBeSaved.id) {
+                if (domainToBeSaved.hostname === existingDomainWithSameHostname?.hostname &&
+                    domainToBeSaved.id &&
+                    domainToBeSaved.id !== existingDomainWithSameHostname?.id) {
+                    throw new ServiceException("Hostname is already in use by this or another app.");
+                }
+                const existingDomainForApp = await client.appDomain.findFirst({
+                    where: {
+                        id: domainToBeSaved.id as string,
+                        appId: domainToBeSaved.appId as string,
+                    }
+                });
+                if (!existingDomainForApp) {
+                    throw new ServiceException("App domain has ID, but existing item for app was not found.");
+                }
+                savedItem = await client.appDomain.update({
+                    where: {
+                        id: domainToBeSaved.id as string
+                    },
+                    data: domainToBeSaved
+                });
+            } else {
+                if (existingDomainWithSameHostname) {
+                    throw new ServiceException("Hostname is already in use by this or another app.");
+                }
+                savedItem = await client.appDomain.create({
+                    data: domainToBeSaved as Prisma.AppDomainUncheckedCreateInput
+                });
+            }
+
+        } finally {
+            if (!tx) {
+                revalidateTag(Tags.apps(existingApp.projectId as string));
+                revalidateTag(Tags.app(existingApp.id as string));
+            }
+        }
+        return savedItem;
+    }
+
+    async getDomainById(id: string) {
+        return await dataAccess.client.appDomain.findFirstOrThrow({
+            where: {
+                id
+            }
+        });
+    }
+
+    async deleteDomainById(id: string) {
+        const existingDomain = await dataAccess.client.appDomain.findFirst({
+            where: {
+                id
+            }, include: {
+                app: true
+            }
+        });
+        if (!existingDomain) {
+            return;
+        }
+        try {
+            await dataAccess.client.appDomain.delete({
+                where: {
+                    id
+                }
+            });
+        } finally {
+            revalidateTag(Tags.app(existingDomain.appId));
+            revalidateTag(Tags.apps(existingDomain.app.projectId));
+        }
+    }
+
+    async getAllVolumesWithApp() {
+        return await dataAccess.client.appVolume.findMany({
+            include: {
+                app: true
+            },
+            orderBy: {
+                appId: 'asc'
+            }
+        });
+    }
+
+    async getVolumeById(id: string) {
+        return await dataAccess.client.appVolume.findFirst({
+            where: {
+                id
+            }
+        });
+    }
+
+    async getVolumeWithAppById(id: string) {
+        return dataAccess.client.appVolume.findFirstOrThrow({
+            where: { id },
+            include: { app: true },
+        });
+    }
+
+    async getFileMountAppId(fileMountId: string) {
+        const fileMount = await dataAccess.client.appFileMount.findFirstOrThrow({
+            where: { id: fileMountId },
+            select: { appId: true },
+        });
+        return fileMount.appId;
+    }
+
+    async getShareableVolumesByProjectId(projectId: string, appId: string) {
+        return await dataAccess.client.appVolume.findMany({
+            where: {
+                app: {
+                    projectId
+                },
+                appId: {
+                    not: appId
+                },
+                shareWithOtherApps: true,
+                accessMode: 'ReadWriteMany',
+                sharedVolumeId: null
+            },
+            include: {
+                app: true
+            },
+            orderBy: {
+                createdAt: 'desc'
+            }
+        });
+    }
+
+    async saveVolume(volumeToBeSaved: Prisma.AppVolumeUncheckedCreateInput | Prisma.AppVolumeUncheckedUpdateInput, tx?: Prisma.TransactionClient) {
+        let savedItem: AppVolume;
+        const client = tx || dataAccess.client;
+        const existingApp = await this.getExtendedById(volumeToBeSaved.appId as string, false, client);
+        const existingAppWithSameVolumeMountPath = await client.appVolume.findMany({
+            where: {
+                appId: volumeToBeSaved.appId as string,
+            }
+        });
+
+        if (existingAppWithSameVolumeMountPath
+            .filter(x => x.id !== volumeToBeSaved.id)
+            .some(x => x.containerMountPath === volumeToBeSaved.containerMountPath)) {
+            throw new ServiceException("Mount Path is already configured within the same app.");
+        }
+
+        try {
+            if (volumeToBeSaved.id) {
+                const existingVolumeForApp = await client.appVolume.findFirst({
+                    where: {
+                        id: volumeToBeSaved.id as string,
+                        appId: volumeToBeSaved.appId as string,
+                    }
+                });
+                if (!existingVolumeForApp) {
+                    throw new ServiceException("App volume has ID, but existing item for app was not found.");
+                }
+                savedItem = await client.appVolume.update({
+                    where: {
+                        id: volumeToBeSaved.id as string
+                    },
+                    data: volumeToBeSaved
+                });
+            } else {
+                savedItem = await client.appVolume.create({
+                    data: volumeToBeSaved as Prisma.AppVolumeUncheckedCreateInput
+                });
+            }
+
+        } finally {
+            if (!tx) {
+                revalidateTag(Tags.apps(existingApp.projectId as string));
+                revalidateTag(Tags.app(existingApp.id as string));
+            }
+        }
+        return savedItem;
+    }
+
+    async deleteVolumeById(id: string) {
+        const existingVolume = await dataAccess.client.appVolume.findFirst({
+            where: {
+                id
+            }, include: {
+                app: true,
+                sharedVolumes: true
+            }
+        });
+        if (!existingVolume) {
+            return;
+        }
+
+        // get ids of all apps that use this volume as shared volume --> to reset cache
+        let additionalAppIds = existingVolume.sharedVolumes.map(v => v.appId);
+        try {
+            await dataAccess.client.appVolume.delete({
+                where: {
+                    id
+                }
+            });
+        } finally {
+            revalidateTag(Tags.app(existingVolume.appId));
+            revalidateTag(Tags.apps(existingVolume.app.projectId));
+            for (const appId of additionalAppIds) {
+                revalidateTag(Tags.app(appId));
+            }
+        }
+    }
+
+    async getFileMountById(fileMountId: string) {
+        return await dataAccess.client.appFileMount.findFirstOrThrow({
+            where: {
+                id: fileMountId
+            }
+        });
+    }
+
+    async saveFileMount(fileMountToBeSaved: Prisma.AppFileMountUncheckedCreateInput | Prisma.AppFileMountUncheckedUpdateInput, tx?: Prisma.TransactionClient) {
+        let savedItem: AppFileMount;
+        const client = tx || dataAccess.client;
+        const existingApp = await this.getExtendedById(fileMountToBeSaved.appId as string, false, client);
+        const existingAppWithSameVolumeMountPath = await client.appFileMount.findMany({
+            where: {
+                appId: fileMountToBeSaved.appId as string,
+            }
+        });
+
+        if (existingAppWithSameVolumeMountPath.filter(x => x.id !== fileMountToBeSaved.id)
+            .some(x => x.containerMountPath === fileMountToBeSaved.containerMountPath)) {
+            throw new ServiceException("Mount Path is already configured within the same app.");
+        }
+
+        try {
+            if (fileMountToBeSaved.id) {
+                const existingFileMountForApp = await client.appFileMount.findFirst({
+                    where: {
+                        id: fileMountToBeSaved.id as string,
+                        appId: fileMountToBeSaved.appId as string,
+                    }
+                });
+                if (!existingFileMountForApp) {
+                    throw new ServiceException("App file mount has ID, but existing item for app was not found.");
+                }
+                savedItem = await client.appFileMount.update({
+                    where: {
+                        id: fileMountToBeSaved.id as string
+                    },
+                    data: fileMountToBeSaved
+                });
+            } else {
+                savedItem = await client.appFileMount.create({
+                    data: fileMountToBeSaved as Prisma.AppFileMountUncheckedCreateInput
+                });
+            }
+
+        } finally {
+            if (!tx) {
+                revalidateTag(Tags.apps(existingApp.projectId as string));
+                revalidateTag(Tags.app(existingApp.id as string));
+            }
+        }
+        return savedItem;
+    }
+
+    async deleteFileMountById(id: string) {
+        const existingVolume = await dataAccess.client.appFileMount.findFirst({
+            where: {
+                id
+            }, include: {
+                app: true
+            }
+        });
+        if (!existingVolume) {
+            return;
+        }
+        try {
+            await dataAccess.client.appFileMount.delete({
+                where: {
+                    id
+                }
+            });
+        } finally {
+            revalidateTag(Tags.app(existingVolume.appId));
+            revalidateTag(Tags.apps(existingVolume.app.projectId));
+        }
+    }
+
+    async saveBasicAuth(itemToBeSaved: Prisma.AppBasicAuthUncheckedCreateInput | Prisma.AppBasicAuthUncheckedUpdateInput, tx?: Prisma.TransactionClient) {
+        let savedItem: AppBasicAuth;
+        const client = tx || dataAccess.client;
+        const existingApp = await this.getExtendedById(itemToBeSaved.appId as string, false, client);
+        try {
+            if (itemToBeSaved.id) {
+                const existingBasicAuthForApp = await client.appBasicAuth.findFirst({
+                    where: {
+                        id: itemToBeSaved.id as string,
+                        appId: itemToBeSaved.appId as string,
+                    }
+                });
+                if (!existingBasicAuthForApp) {
+                    throw new ServiceException("App basic auth has ID, but existing item for app was not found.");
+                }
+                savedItem = await client.appBasicAuth.update({
+                    where: {
+                        id: itemToBeSaved.id as string
+                    },
+                    data: itemToBeSaved
+                });
+            } else {
+                savedItem = await client.appBasicAuth.create({
+                    data: itemToBeSaved as Prisma.AppBasicAuthUncheckedCreateInput
+                });
+            }
+
+        } finally {
+            if (!tx) {
+                revalidateTag(Tags.apps(existingApp.projectId as string));
+                revalidateTag(Tags.app(existingApp.id as string));
+            }
+        }
+        return savedItem;
+    }
+
+    async deleteBasicAuthById(id: string) {
+        const existingItem = await dataAccess.client.appBasicAuth.findFirst({
+            where: {
+                id
+            }, include: {
+                app: true
+            }
+        });
+        if (!existingItem) {
+            return;
+        }
+        try {
+            await dataAccess.client.appBasicAuth.delete({
+                where: {
+                    id
+                }
+            });
+        } finally {
+            revalidateTag(Tags.app(existingItem.appId));
+            revalidateTag(Tags.apps(existingItem.app.projectId));
+        }
+    }
+
+    async getBasicAuthById(id: string) {
+        return await dataAccess.client.appBasicAuth.findFirstOrThrow({
+            where: {
+                id
+            }
+        });
+    }
+
+    async getAll() {
+        const apps = await dataAccess.client.app.findMany({
+            orderBy: {
+                name: 'asc'
+            },
+            include: {
+                appDomains: true,
+                appNodePorts: true,
+                appFileMounts: true,
+                appVolumes: true,
+                appBasicAuths: true,
+                appNetworkPolicy: {
+                    include: {
+                        rules: {
+                            include: {
+                                targetApp: {
+                                    select: { id: true, name: true, projectId: true }
+                                },
+                                targetAgent: {
+                                    select: { id: true, name: true, projectId: true }
+                                }
+                            }
+                        }
+                    }
+                },
+                project: true
+            }
+        }) as AppExtendedModel[];
+
+        apps.sort((a, b) => {
+            if (a.project.name.toLocaleLowerCase() < b.project.name.toLocaleLowerCase()) {
+                return -1;
+            }
+            if (a.project.name.toLocaleLowerCase() > b.project.name.toLocaleLowerCase()) {
+                return 1;
+            }
+            if (a.name.toLocaleLowerCase() < b.name.toLocaleLowerCase()) {
+                return -1;
+            }
+            if (a.name.toLocaleLowerCase() > b.name.toLocaleLowerCase()) {
+                return 1;
+            }
+            return 0;
+        });
+        return apps;
+    }
+
+    async saveNodePort(nodePortToBeSaved: Prisma.AppNodePortUncheckedCreateInput | Prisma.AppNodePortUncheckedUpdateInput, tx?: Prisma.TransactionClient) {
+        const client = tx || dataAccess.client;
+        const existingApp = await this.getExtendedById(nodePortToBeSaved.appId as string, false, client);
+
+        const nodePortValue = nodePortToBeSaved.nodePort as number;
+        const existingWithSameNodePort = await client.appNodePort.findFirst({
+            where: {
+                nodePort: nodePortValue,
+                NOT: { id: nodePortToBeSaved.id as string | undefined },
+            }
+        });
+        if (existingWithSameNodePort) {
+            throw new ServiceException(`Node port ${nodePortValue} is already in use by another app.`);
+        }
+
+        let savedItem: AppNodePort;
+        try {
+            if (nodePortToBeSaved.id) {
+                const existingNodePortForApp = await client.appNodePort.findFirst({
+                    where: {
+                        id: nodePortToBeSaved.id as string,
+                        appId: nodePortToBeSaved.appId as string,
+                    }
+                });
+                if (!existingNodePortForApp) {
+                    throw new ServiceException("App node port has ID, but existing item for app was not found.");
+                }
+                savedItem = await client.appNodePort.update({
+                    where: { id: nodePortToBeSaved.id as string },
+                    data: nodePortToBeSaved,
+                });
+            } else {
+                savedItem = await client.appNodePort.create({
+                    data: nodePortToBeSaved as Prisma.AppNodePortUncheckedCreateInput,
+                });
+            }
+        } finally {
+            if (!tx) {
+                revalidateTag(Tags.apps(existingApp.projectId as string));
+                revalidateTag(Tags.app(existingApp.id as string));
+            }
+        }
+        return savedItem;
+    }
+
+    async getNodePortById(id: string) {
+        return await dataAccess.client.appNodePort.findFirstOrThrow({
+            where: { id },
+        });
+    }
+
+    async deleteNodePortById(id: string) {
+        const existing = await dataAccess.client.appNodePort.findFirst({
+            where: { id },
+            include: { app: true },
+        });
+        if (!existing) {
+            return;
+        }
+        try {
+            await dataAccess.client.appNodePort.delete({
+                where: { id },
+            });
+        } finally {
+            revalidateTag(Tags.app(existing.appId));
+            revalidateTag(Tags.apps(existing.app.projectId));
+        }
+    }
+}
+
+const appService = new AppService();
+export default appService;
