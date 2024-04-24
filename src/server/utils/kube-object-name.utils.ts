@@ -1,0 +1,152 @@
+import * as crypto from 'crypto';
+
+export class KubeObjectNameUtils {
+
+    private static readonly MAX_OBJECT_NAME_LENGTH = 30; // in Kubernetes, the maximum length of an object name is 63 characters
+    private static readonly MAX_LABEL_VALUE_LENGTH = 63;
+    private static readonly RANDOM_SUFFIX_LENGTH = 9; // "-" + 8 hexadecimal characters
+
+    static toSnakeCase(str: string): string {
+        if (!str) {
+            return str;
+        }
+        return str
+            .replace(/([a-z])([A-Z])/g, '$1_$2')   // Insert underscore between camel case boundaries
+            .replace(/\s+/g, '_')                   // Replace spaces with underscores
+            .replace(/[^\w_]+/g, '')                // Remove any non-alphanumeric characters except underscores
+            .toLowerCase();                         // Convert to lowercase
+    }
+
+    static toObjectId(str: string): string {
+        let snakeCase = KubeObjectNameUtils.toSnakeCase(str);
+        const randomString = crypto.randomBytes(4).toString('hex');
+        snakeCase = `${snakeCase}-${randomString}`;
+        return snakeCase
+            .replace(/_/g, '-')                     // Replace underscores with hyphens
+            .replace(/[^a-zA-Z0-9-]+/g, '')         // Remove any non-alphanumeric characters except hyphens
+            .toLowerCase();                         // Convert to lowercase
+    }
+
+    static toProjectId(str: string): `proj-${string}` {
+        str = str.substring(0, KubeObjectNameUtils.MAX_OBJECT_NAME_LENGTH).trim();
+        return `proj-${KubeObjectNameUtils.toObjectId(str)}`;
+    }
+
+    static toAppId(str: string): `app-${string}` {
+        str = str.substring(0, KubeObjectNameUtils.MAX_OBJECT_NAME_LENGTH).trim();
+        return `app-${KubeObjectNameUtils.toObjectId(str)}`;
+    }
+
+    static toAgentId(str: string): `agent-${string}` {
+        str = str.substring(0, KubeObjectNameUtils.MAX_OBJECT_NAME_LENGTH).trim();
+        return `agent-${KubeObjectNameUtils.toObjectId(str)}`;
+    }
+
+    static toJobName(appId: string): `build-${string}` {
+        return `build-${appId}`;
+    }
+
+    static toDatabaseBackupJobName(database: 'postgres' | 'mongodb' | 'mariadb', appId: string): string {
+        const prefix = `backup-${database}-`;
+        const maxAppIdLength = KubeObjectNameUtils.MAX_LABEL_VALUE_LENGTH
+            - prefix.length
+            - KubeObjectNameUtils.RANDOM_SUFFIX_LENGTH;
+
+        return KubeObjectNameUtils.addRandomSuffix(`${prefix}${appId.substring(0, maxAppIdLength)}`);
+    }
+
+    static addRandomSuffix(str: string): string {
+        // added suffix is 8 characters long
+        const randomString = crypto.randomBytes(4).toString('hex');
+        return `${str}-${randomString}`;
+    }
+
+    static toServiceName(appId: string): `svc-${string}` {
+        return `svc-${appId}`;
+    }
+
+    static toNodePortServiceName(appId: string): `np-${string}` {
+        return `np-${appId}`;
+    }
+
+    static toPvcName(volumeId: string): `pvc-${string}` {
+        return `pvc-${volumeId}`;
+    }
+
+    private static readonly AGENT_WORKSPACE_PVC_PREFIX = 'av-';
+
+    static toAgentPvcName(agentId: string, agentVolumeId: string): string {
+        const raw = `${agentId}-${agentVolumeId}`;
+        const hash = crypto.createHash('sha256').update(raw).digest('hex');
+        return `${KubeObjectNameUtils.AGENT_WORKSPACE_PVC_PREFIX}${hash.substring(0, 60)}`;
+    }
+
+    static isAgentPvcName(name: string): boolean {
+        return name.startsWith(KubeObjectNameUtils.AGENT_WORKSPACE_PVC_PREFIX);
+    }
+
+    static toAgentClaimName(agentId: string): string {
+        return `ac-${this.addRandomSuffix(agentId.substring(0, 52))}`;
+    }
+
+    private static readonly AGENT_TAG_PVC_PREFIX = 'av-';
+
+    static toAgentTagPvcName(agentId: string, agentVolumeId: string, customTag: string): string {
+        const raw = `${agentId}:${agentVolumeId}:${customTag}`;
+        const hash = crypto.createHash('sha256').update(raw).digest('hex');
+        return `${KubeObjectNameUtils.AGENT_TAG_PVC_PREFIX}${hash.substring(0, 60)}`;
+    }
+
+    private static readonly AGENT_SANDBOX_PREFIX = 'as-';
+
+    static toAgentSandboxName(agentId: string, customTag: string): string {
+        const identifier = crypto.createHash('sha256').update(`${agentId}:${customTag}`).digest('hex');
+        return `${KubeObjectNameUtils.AGENT_SANDBOX_PREFIX}${identifier.substring(0, 60)}`;
+    }
+
+    static toRestorePodName(volumeId: string): `restore-${string}` {
+        return `restore-${volumeId}`;
+    }
+
+    static getIngressName(domainId: string): `ingress-${string}` {
+        return `ingress-${domainId}`;
+    }
+
+    static getConfigMapName(id: string): `cm-${string}` {
+        return `cm-${id}`;
+    }
+
+    static toSecretId(id: string): `secret-${string}` {
+        return `secret-${id}`;
+    }
+
+    static toAgentTaggedVirtualKeySecretId(agentId: string, customTag: string): `tagkey-${string}` {
+        const identifier = crypto.createHash('sha256').update(`${agentId}:${customTag}`).digest('hex');
+        return `tagkey-${identifier}`;
+    }
+
+    static toAgentSandboxVirtualKeySecretId(agentId: string, sandboxName: string): `sandboxkey-${string}` {
+        const identifier = crypto.createHash('sha256').update(`${agentId}:${sandboxName}`).digest('hex');
+        return `sandboxkey-${identifier}`;
+    }
+
+    static toPullSecretId(id: string): `pullsec-${string}` {
+        return `pullsec-${id.substring(0, 55)}`;
+    }
+
+    static toDbGateId(appId: string): `dbgate-${string}` {
+        return `dbgate-${appId}`;
+    }
+
+    static toPhpMyAdminId(appId: string): `phpma-${string}` {
+        return `phpma-${appId}`;
+    }
+
+    static toPgAdminId(appId: string): `pga-${string}` {
+        return `pga-${appId}`;
+    }
+
+    static toNetworkPolicyName(appId: string): string {
+        return `np-${appId}`.substring(0, 63); // not more than 63 characters
+    }
+}
