@@ -1,0 +1,354 @@
+import k3s from "../adapter/kubernetes-api.adapter";
+import { V1Deployment } from "@kubernetes/client-node";
+import namespaceService from "./namespace.service";
+import podService from "./pod.service";
+import registryApiAdapter from "../adapter/registry-api.adapter";
+import { Constants } from "@/shared/utils/constants";
+import { S3Target } from "@prisma/client";
+import s3TargetService from "./s3-target.service";
+import clusterService from "./cluster.service";
+import { ServiceException } from "@/shared/model/service.exception.model";
+import s3Adapter from "../adapter/aws-s3.adapter";
+import { GitHashUtils } from "@/shared/utils/git-hash.utils";
+import { WorkloadType } from "@/shared/model/runtime-type.model";
+
+const REGISTRY_NODE_PORT = 30100;
+const REGISTRY_CONTAINER_PORT = 5000;
+const REGISTRY_SVC_NAME = 'registry-svc';
+const REGISTRY_PVC_NAME = 'registry-data-pvc';
+const REGISTRY_CONFIG_MAP_NAME = 'registry-config-map';
+const REGISTRY_DEPLOYMENT_NAME = 'registry';
+const REGISTRY_IMAGE = 'registry:3.1.1';
+export const BUILD_NAMESPACE = "registry-and-build";
+export const REGISTRY_URL_EXTERNAL = `localhost:${REGISTRY_NODE_PORT}`;
+export const REGISTRY_URL_INTERNAL = `${REGISTRY_SVC_NAME}.${BUILD_NAMESPACE}.svc.cluster.local:${REGISTRY_CONTAINER_PORT}`
+
+
+class RegistryService {
+
+    async purgeRegistryImages() {
+        const allImages = await registryApiAdapter.getAllImages();
+        let totalSize = 0;
+        for (const image of allImages) {
+            const tags = await registryApiAdapter.listTagsForImage(image);
+            for (const tag of tags) {
+                try {
+                    totalSize += await registryApiAdapter.deleteImage(image, tag);
+                } catch (error) {
+                    console.error(`Failed to delete image ${image}:${tag}`, error);
+                }
+            }
+        }
+        await this.runGarbageCollection();
+        return totalSize;
+    }
+
+    private async runGarbageCollection() {
+        const pods = await podService.getPodsForApp(BUILD_NAMESPACE, 'registry');
+        if (pods.length !== 1) {
+            throw new Error('Cannot run garbage collection, because registry is not running.');
+        }
+        console.log("Running garbage collection...");
+        await podService.runCommandInPod(BUILD_NAMESPACE, pods[0].podName, pods[0].containerName, ['bin/registry', 'garbage-collect', '/etc/distribution/config.yml']);
+        console.log("Garbage collection completed.");
+    }
+
+    async doesImageExist(image: string, tag: string) {
+        const images = await registryApiAdapter.getAllImages();
+        for (const i of images) {
+            if (i === image) {
+                const tags = await registryApiAdapter.listTagsForImage(image);
+                if (tags.includes(tag)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    createInternalContainerRegistryUrlForAppId(appId: string, tag?: string) {
+        return `${REGISTRY_URL_INTERNAL}/${appId}:${tag || 'latest'}`;
+    }
+
+    createContainerRegistryUrlForAppId(appId: string, tag?: string) {
+        return `${REGISTRY_URL_EXTERNAL}/${appId}:${tag || 'latest'}`;
+    }
+
+    createBuildImageNames(appId: string, workloadType: WorkloadType, commitHash?: string | null, isRollback = false) {
+        if (workloadType === 'agent') {
+            return this.createInternalContainerRegistryUrlForAppId(appId);
+        }
+        const latestTag = this.createInternalContainerRegistryUrlForAppId(appId);
+        const commitTag = GitHashUtils.shortGitHash(commitHash);
+        if (!commitTag) {
+            return latestTag;
+        }
+        const commitTagUrl = this.createInternalContainerRegistryUrlForAppId(appId, commitTag);
+        return isRollback ? commitTagUrl : `${latestTag},${commitTagUrl}`;
+    }
+
+    async deployRegistry(registryLocation: string, forceDeploy = false) {
+        const useLocalStorage = registryLocation === Constants.INTERNAL_REGISTRY_LOCATION;
+        const s3Target = useLocalStorage ? undefined : await s3TargetService.getById(registryLocation!);
+
+        console.log("Ensuring namespace is created...");
+        await namespaceService.createNamespaceIfNotExists(BUILD_NAMESPACE);
+
+        // Always update the ConfigMap so storage settings are never stale
+        await this.createOrUpdateRegistryConfigMap(s3Target);
+
+        const deployments = await k3s.apps.listNamespacedDeployment({ namespace: BUILD_NAMESPACE });
+        const existingDeployment = deployments.items.find(dep => dep.metadata?.name === REGISTRY_DEPLOYMENT_NAME);
+        const deployedImage = existingDeployment?.spec?.template?.spec?.containers?.[0]?.image;
+        const registryImageOutdated = !!existingDeployment && deployedImage !== REGISTRY_IMAGE;
+        if (existingDeployment && !forceDeploy && !registryImageOutdated) {
+            return;
+        }
+
+        if (registryImageOutdated) {
+            console.log(`Registry image is outdated (deployed: ${deployedImage}, expected: ${REGISTRY_IMAGE}), redeploying...`);
+        }
+        console.log("(Re)deploying registry because it is not deployed or forced...");
+        console.log(`Registry storage location is set to ${registryLocation}.`);
+
+        if (useLocalStorage) {
+            await this.createPersistenvColumeCLaim();
+        }
+
+        await this.createOrUpdateRegistryDeployment(useLocalStorage);
+
+        await this.createOrUpdateRegistryService();
+
+        console.log("Waiting for registry to be deployed...");
+        const pods = await podService.getPodsForApp(BUILD_NAMESPACE, 'registry');
+        if (pods.length === 1) {
+            await podService.waitUntilPodIsRunningFailedOrSucceded(BUILD_NAMESPACE, pods[0].podName)
+        }
+
+        console.log("Registry deployed successfully.");
+        await new Promise(resolve => setTimeout(resolve, 5000)); // wait a bit for the registry to be ready
+    }
+
+    private async createPersistenvColumeCLaim() {
+        console.log("Creating Registry PVC...");
+        const pvcManifest = {
+            apiVersion: 'v1',
+            kind: 'PersistentVolumeClaim',
+            metadata: {
+                name: REGISTRY_PVC_NAME,
+                namespace: BUILD_NAMESPACE,
+            },
+            spec: {
+                accessModes: ['ReadWriteOnce'],
+                storageClassName: 'local-path',
+                resources: {
+                    requests: {
+                        storage: '10Gi',
+                    },
+                },
+            },
+        };
+
+        const listRes = await k3s.core.listNamespacedPersistentVolumeClaim({ namespace: BUILD_NAMESPACE });
+        if (listRes.items.find(pvc => pvc.metadata?.name === REGISTRY_PVC_NAME)) {
+            console.log("PVC already exists, skipping creation...");
+            return;
+        }
+        await k3s.core.createNamespacedPersistentVolumeClaim({ namespace: BUILD_NAMESPACE, body: pvcManifest });
+    }
+
+    private async createOrUpdateRegistryService() {
+        console.log("Creating Registry Service...");
+        const serviceManifest = {
+            apiVersion: 'v1',
+            kind: 'Service',
+            metadata: {
+                name: REGISTRY_SVC_NAME,
+                namespace: BUILD_NAMESPACE,
+            },
+            spec: {
+                selector: {
+                    app: 'registry',
+                },
+                ports: [
+                    {
+                        nodePort: REGISTRY_NODE_PORT,
+                        protocol: 'TCP',
+                        port: REGISTRY_CONTAINER_PORT,
+                        targetPort: REGISTRY_CONTAINER_PORT,
+                    },
+                ],
+                type: 'NodePort',
+            },
+        };
+
+        const existingServices = await k3s.core.listNamespacedService({ namespace: BUILD_NAMESPACE });
+        if (existingServices.items.find(svc => svc.metadata?.name === REGISTRY_SVC_NAME)) {
+            console.log("Service already exists, deleting and recreating...");
+            await k3s.core.deleteNamespacedService({ name: REGISTRY_SVC_NAME, namespace: BUILD_NAMESPACE });
+        }
+
+        await k3s.core.createNamespacedService({ namespace: BUILD_NAMESPACE, body: serviceManifest });
+    }
+
+    private async createOrUpdateRegistryDeployment(useLocalStorage = true) {
+        console.log("Creating Registry Deployment...");
+
+        const deploymentName = REGISTRY_DEPLOYMENT_NAME;
+
+        const masterNode = await clusterService.getFirstMasterNode();
+        if (useLocalStorage && !masterNode) {
+            throw new ServiceException("Cannot deploy registry with local storage, because could not evaluate master node.");
+        }
+        const registryPlacement = useLocalStorage ? {
+            nodeSelector: {
+                'kubernetes.io/hostname': masterNode.name,
+            }
+        } : {};
+
+        const localStorageVolumeMount = useLocalStorage ? [{
+            name: 'registry-data-pv',
+            mountPath: '/var/lib/registry',
+        }] : [];
+
+        const localStorageVolume = useLocalStorage ? [{
+            name: 'registry-data-pv',
+            persistentVolumeClaim: {
+                claimName: REGISTRY_PVC_NAME,
+            },
+        }] : [];
+
+        const deploymentManifest: V1Deployment = {
+            apiVersion: 'apps/v1',
+            kind: 'Deployment',
+            metadata: {
+                name: deploymentName,
+                namespace: BUILD_NAMESPACE,
+            },
+            spec: {
+                replicas: 1,
+                strategy: {
+                    type: 'Recreate',
+                },
+                selector: {
+                    matchLabels: {
+                        app: deploymentName,
+                    },
+                },
+                template: {
+                    metadata: {
+                        labels: {
+                            app: deploymentName,
+                        },
+                    },
+                    spec: {
+                        ...registryPlacement,
+                        containers: [
+                            {
+                                name: deploymentName,
+                                image: REGISTRY_IMAGE,
+                                volumeMounts: [
+                                    ...localStorageVolumeMount,
+                                    {
+                                        name: REGISTRY_CONFIG_MAP_NAME,
+                                        mountPath: '/etc/distribution',
+                                        readOnly: true,
+                                    }
+                                ],
+                            },
+                        ],
+                        volumes: [
+                            ...localStorageVolume,
+                            {
+                                name: REGISTRY_CONFIG_MAP_NAME,
+                                configMap: {
+                                    name: REGISTRY_CONFIG_MAP_NAME,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        };
+
+        const existingDeployments = await k3s.apps.listNamespacedDeployment({ namespace: BUILD_NAMESPACE });
+        if (existingDeployments.items.find(dep => dep.metadata?.name === deploymentName)) {
+            console.log("Deployment already exists, deleting and recreating...");
+            await k3s.apps.deleteNamespacedDeployment({ name: deploymentName, namespace: BUILD_NAMESPACE });
+        }
+
+        await k3s.apps.createNamespacedDeployment({ namespace: BUILD_NAMESPACE, body: deploymentManifest });
+    }
+
+    private async createOrUpdateRegistryConfigMap(s3Target?: S3Target) {
+
+        /* DO NOT REFORMAT THESE TWO STRINGS */
+        let storageProvider = '';
+        if (s3Target) {
+            let storageS3provider = `  s3:
+    accesskey: ${s3Target.accessKeyId}
+    secretkey: ${s3Target.secretKey}
+    region: ${s3Target.region}
+    bucket: ${s3Target.bucketName}
+    secure: ${s3Adapter.isSecureEndpoint(s3Target.endpoint)}
+    v4auth: ${s3Target.v4Auth}
+    loglevel: debug`;
+            if (s3Target.endpoint) {
+                storageS3provider += `
+    regionendpoint: ${s3Adapter.getEndpointUrl(s3Target.endpoint)}
+    forcepathstyle: ${s3Target.forcePathStyle}`;
+            }
+            storageProvider = storageS3provider;
+        } else {
+            const storageFilesSystemprovider = `  filesystem:
+    rootdirectory: /var/lib/registry`;
+            storageProvider = storageFilesSystemprovider;
+        }
+
+
+        // Source: https://distribution.github.io/distribution/about/configuration/
+        console.log("Creating Registry ConfigMap...");
+        const configMapManifest = {
+            apiVersion: 'v1',
+            kind: 'ConfigMap',
+            metadata: {
+                name: REGISTRY_CONFIG_MAP_NAME,
+                namespace: BUILD_NAMESPACE,
+            },
+            data: {
+                'config.yml': `
+version: 0.1
+log:
+  fields:
+    service: registry
+storage:
+${storageProvider}
+  delete:
+    enabled: true
+  maintenance:
+    uploadpurging:
+      enabled: true
+      age: 10h
+      interval: 24h
+      dryrun: false
+    readonly:
+      enabled: false
+http:
+  addr: :5000
+  headers:
+    X-Content-Type-Options: [nosniff]
+`
+            },
+        };
+        const existingConfigMaps = await k3s.core.listNamespacedConfigMap({ namespace: BUILD_NAMESPACE });
+        if (existingConfigMaps.items.find(cm => cm.metadata?.name === REGISTRY_CONFIG_MAP_NAME)) {
+            console.log("ConfigMap already exists, deleting and recreating...");
+            await k3s.core.deleteNamespacedConfigMap({ name: REGISTRY_CONFIG_MAP_NAME, namespace: BUILD_NAMESPACE });
+        }
+
+        await k3s.core.createNamespacedConfigMap({ namespace: BUILD_NAMESPACE, body: configMapManifest });
+    }
+}
+
+const registryService = new RegistryService();
+export default registryService;
