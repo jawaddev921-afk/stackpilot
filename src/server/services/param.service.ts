@@ -1,0 +1,195 @@
+import { revalidateTag, unstable_cache } from "next/cache";
+import dataAccess from "../adapter/db.client";
+import { Tags } from "../utils/cache-tag-generator.utils";
+import { Parameter, Prisma } from "@prisma/client";
+import { Constants } from "../../shared/utils/constants";
+import { CryptoUtils } from "../utils/crypto.utils";
+
+export class ParamService {
+
+    static readonly QS_SERVER_HOSTNAME = Constants.QS_PARAM_SERVER_HOSTNAME;
+    static readonly DISABLE_NODEPORT_ACCESS = 'disableNodePortAccess';
+    static readonly LETS_ENCRYPT_MAIL = 'letsEncryptMail';
+    static readonly USE_CANARY_CHANNEL = 'useCanaryChannel';
+    static readonly REGISTRY_SOTRAGE_LOCATION = 'registryStorageLocation';
+    static readonly PUBLIC_IPV4_ADDRESS = 'publicIpv4Address';
+    static readonly QS_SYSTEM_BACKUP_LOCATION = Constants.QS_SYSTEM_BACKUP_LOCATION_PARAM_KEY;
+    static readonly K3S_JOIN_TOKEN = Constants.K3S_JOIN_TOKEN;
+    static readonly BUILD_MEMORY_LIMIT = 'buildMemoryLimit';
+    static readonly BUILD_MEMORY_RESERVATION = 'buildMemoryReservation';
+    static readonly BUILD_CPU_LIMIT = 'buildCpuLimit';
+    static readonly BUILD_CPU_RESERVATION = 'buildCpuReservation';
+    static readonly BUILD_NODE = 'buildNode';
+    static readonly MAX_PARALLEL_BUILDS = 'maxParallelBuilds';
+    static readonly QS_INSTANCE_ID = 'qsInstanceId';
+    static readonly API_OPEN_API_SPEC_ENABLED = 'apiOpenApiSpecEnabled';
+    static readonly MCP_SERVER_ENABLED = 'mcpServerEnabled';
+    static readonly AGENT_JWT_SECRET = 'agentJwtSecret';
+    static readonly LATEST_COMPLETED_CODE_MIGRATION = 'latestCompletedCodeMigration';
+    static readonly FEATURE_NEW_NETWORK_POLICY_EXPLENATION = 'featureNewNetworkPolicyExplenation';
+
+    async initializeDefaults(revalidateParam = true) {
+        const [instanceId, registryLocation] = await Promise.all([
+            this.getOrCreate(ParamService.QS_INSTANCE_ID, crypto.randomUUID(), revalidateParam),
+            this.getOrCreate(ParamService.DISABLE_NODEPORT_ACCESS, 'false', revalidateParam),
+            this.getOrCreate(ParamService.USE_CANARY_CHANNEL, 'false', revalidateParam),
+            this.getOrCreate(ParamService.REGISTRY_SOTRAGE_LOCATION, Constants.INTERNAL_REGISTRY_LOCATION, revalidateParam),
+            this.getOrCreate(ParamService.QS_SYSTEM_BACKUP_LOCATION, Constants.QS_SYSTEM_BACKUP_DEACTIVATED, revalidateParam),
+            this.getOrCreate(ParamService.MAX_PARALLEL_BUILDS, String(Constants.DEFAULT_MAX_PARALLEL_BUILDS), revalidateParam),
+            this.getOrCreate(ParamService.API_OPEN_API_SPEC_ENABLED, 'false', revalidateParam),
+            this.getOrCreate(ParamService.MCP_SERVER_ENABLED, 'false', revalidateParam),
+        ]);
+
+        return { instanceId, registryLocation };
+    }
+
+    async getUncached(name: string) {
+        return await dataAccess.client.parameter.findFirstOrThrow({
+            where: {
+                name
+            }
+        });
+    }
+
+    async get(name: string) {
+        return await unstable_cache(async (name: string) => await this.getUncached(name),
+            [Tags.parameter()], {
+            tags: [Tags.parameter()],
+            revalidate: 3600
+        })(name);
+    }
+
+    async getOrUndefinedUncached(name: string) {
+        return await dataAccess.client.parameter.findUnique({
+            where: {
+                name
+            }
+        });
+    }
+
+    async getOrCreate(name: string, defaultValue: string, revalidateParam = true) {
+        let param: Parameter;
+        try {
+            param = await dataAccess.client.parameter.upsert({
+                where: {
+                    name
+                },
+                create: {
+                    name,
+                    value: defaultValue
+                },
+                update: {}
+            });
+        } finally {
+            if (revalidateParam) {
+                revalidateTag(Tags.parameter());
+            }
+        }
+        return param;
+    }
+
+    async getOrCreateAgentJwtSecret() {
+        const param = await this.getOrCreate(
+            ParamService.AGENT_JWT_SECRET,
+            CryptoUtils.encrypt(CryptoUtils.generateStrongPasswort(64)),
+        );
+        return CryptoUtils.decrypt(param.value);
+    }
+
+    async getOrUndefined(name: string) {
+        return await unstable_cache(async (name: string) => await this.getOrUndefinedUncached(name),
+            [Tags.parameter()], {
+            tags: [Tags.parameter()],
+            revalidate: 3600
+        })(name);
+    }
+
+    async getBoolean(name: string) {
+        const param = await this.getOrUndefined(name);
+        if (param) {
+            return param.value === 'true';
+        }
+        return undefined;
+    }
+
+    async getString(name: string) {
+        const param = await this.getOrUndefined(name);
+        if (param) {
+            return param.value;
+        }
+        return undefined;
+    }
+
+    async getNumber(name: string) {
+        const param = await this.getOrUndefined(name);
+        if (param) {
+            return Number(param.value);
+        }
+        return undefined;
+    }
+
+    async deleteByName(name: string) {
+        const existingParam = await this.get(name);
+        if (!existingParam) {
+            return;
+        }
+        try {
+            await dataAccess.client.parameter.delete({
+                where: {
+                    name
+                }
+            });
+        } finally {
+            revalidateTag(Tags.parameter());
+        }
+    }
+
+    async deleteByNameIfExists(name: string) {
+        const existingParam = await this.getOrUndefined(name);
+        if (!existingParam) {
+            return;
+        }
+        try {
+            await dataAccess.client.parameter.delete({
+                where: {
+                    name
+                }
+            });
+        } finally {
+            revalidateTag(Tags.parameter());
+        }
+    }
+
+    async getAllParams() {
+        return await unstable_cache(async () => await dataAccess.client.parameter.findMany(),
+            [Tags.parameter()], {
+            tags: [Tags.parameter()],
+            revalidate: 3600
+        })();
+    }
+
+
+    async save(item: Prisma.ParameterUncheckedCreateInput | Prisma.ParameterUncheckedUpdateInput, revalidateParam = true) {
+        let savedItem: Parameter;
+        try {
+            savedItem = await dataAccess.client.parameter.upsert({
+                where: {
+                    name: item.name as string
+                },
+                create: item as Prisma.ParameterUncheckedCreateInput,
+                update: {
+                    value: item.value
+                } as Prisma.ParameterUncheckedUpdateInput
+            });
+        } finally {
+            if (revalidateParam) {
+                revalidateTag(Tags.parameter());
+            }
+        }
+        return savedItem;
+    }
+
+}
+
+const paramService = new ParamService();
+export default paramService;
