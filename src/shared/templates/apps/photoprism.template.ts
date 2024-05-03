@@ -1,0 +1,58 @@
+import { Constants } from "@/shared/utils/constants";
+import { AppTemplateModel } from "../../model/app-template.model";
+
+export const photoprismAppTemplate: AppTemplateModel = {
+    name: "PhotoPrism",
+    description: 'An AI-powered photo management application for organizing, searching, and sharing pictures.',
+    websiteUrl: 'https://github.com/photoprism/photoprism',
+    iconName: 'photoprism.svg',
+    templates: [{
+        inputSettings: [
+            {
+                key: "containerImageSource",
+                label: "Container Image",
+                value: "photoprism/photoprism:latest",
+                isEnvVar: false,
+                randomGeneratedIfEmpty: false,
+            },
+            {
+                key: "PHOTOPRISM_ADMIN_PASSWORD",
+                label: "Admin Password",
+                value: "",
+                isEnvVar: true,
+                randomGeneratedIfEmpty: true,
+            },
+        ],
+        appModel: {
+            name: "PhotoPrism",
+            appType: 'APP',
+            sourceType: 'CONTAINER',
+            containerImageSource: "",
+            replicas: 1,
+            envVars: `PHOTOPRISM_UPLOAD_NSFW=true
+PHOTOPRISM_DETECT_NSFW=false
+PHOTOPRISM_EXPERIMENTAL=false
+PHOTOPRISM_DATABASE_DRIVER=sqlite
+`,
+            useNetworkPolicy: true,
+            healthCheckPeriodSeconds: 60,
+            healthCheckTimeoutSeconds: 30,
+            healthCheckFailureThreshold: Constants.DEFAULT_HEALTH_CHECK_FAILURE_THRESHOLD,
+        },
+        appDomains: [],
+        appVolumes: [{
+            size: 500,
+            containerMountPath: '/photoprism/storage',
+            accessMode: 'ReadWriteOnce',
+            storageClassName: 'longhorn',
+            shareWithOtherApps: false,
+        }, {
+            size: 10000,
+            containerMountPath: '/photoprism/originals',
+            accessMode: 'ReadWriteOnce',
+            storageClassName: 'longhorn',
+            shareWithOtherApps: false,
+        }],
+        appFileMounts: [],
+    }],
+};
