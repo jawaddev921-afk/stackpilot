@@ -1,0 +1,43 @@
+import { Constants } from "@/shared/utils/constants";
+import { AppTemplateModel } from "../../model/app-template.model";
+
+export const wikijsAppTemplate: AppTemplateModel = {
+    name: "Wiki.js",
+    description: 'A modern, extensible wiki for writing, organizing, and sharing documentation.',
+    websiteUrl: 'https://github.com/requarks/wiki',
+    iconName: 'wikijs.svg',
+    templates: [{
+        inputSettings: [
+            {
+                key: "containerImageSource",
+                label: "Container Image",
+                value: "ghcr.io/requarks/wiki:2",
+                isEnvVar: false,
+                randomGeneratedIfEmpty: false,
+            },
+        ],
+        appModel: {
+            name: "Wiki.js",
+            appType: 'APP',
+            sourceType: 'CONTAINER',
+            containerImageSource: "",
+            replicas: 1,
+            envVars: `DB_TYPE=sqlite
+DB_FILEPATH=/wiki/data/database.sqlite
+`,
+            useNetworkPolicy: true,
+            healthCheckPeriodSeconds: Constants.DEFAULT_HEALTH_CHECK_PERIOD_SECONDS,
+            healthCheckTimeoutSeconds: Constants.DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS,
+            healthCheckFailureThreshold: Constants.DEFAULT_HEALTH_CHECK_FAILURE_THRESHOLD,
+        },
+        appDomains: [],
+        appVolumes: [{
+            size: 500,
+            containerMountPath: '/wiki/data',
+            accessMode: 'ReadWriteOnce',
+            storageClassName: 'longhorn',
+            shareWithOtherApps: false,
+        }],
+        appFileMounts: [],
+    }],
+};

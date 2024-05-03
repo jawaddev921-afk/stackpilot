@@ -1,0 +1,97 @@
+import { Constants } from "@/shared/utils/constants";
+import { AppTemplateModel } from "../../model/app-template.model";
+import { getPostgresAppTemplate } from "../databases/postgres.template";
+import { getRedisAppTemplate } from "../databases/redis.template";
+import { AppExtendedModel } from "@/shared/model/app-extended.model";
+import { AppTemplateUtils } from "@/server/utils/app-template.utils";
+import { NetworkPolicyTemplateUtils } from "../network-policy-template.utils";
+
+export const docmostAppTemplate: AppTemplateModel = {
+    name: "Docmost",
+    description: 'An open-source collaborative wiki and documentation workspace for teams.',
+    websiteUrl: 'https://github.com/docmost/docmost',
+    iconName: 'docmost.webp',
+    templates: [
+        // PostgreSQL
+        getPostgresAppTemplate({
+            appName: 'Docmost PostgreSQL',
+            dbName: 'docmost',
+            dbUsername: 'docmost'
+        }),
+        // Redis
+        getRedisAppTemplate({
+            appName: 'Docmost Redis'
+        }),
+        // Docmost
+        {
+            inputSettings: [
+                {
+                    key: "containerImageSource",
+                    label: "Container Image",
+                    value: "docmost/docmost:0.25",
+                    isEnvVar: false,
+                    randomGeneratedIfEmpty: false,
+                },
+                {
+                    key: "APP_SECRET",
+                    label: "App Secret",
+                    value: "",
+                    isEnvVar: true,
+                    randomGeneratedIfEmpty: true,
+                },
+            ],
+            appModel: {
+                name: "Docmost",
+                appType: 'APP',
+                sourceType: 'CONTAINER',
+                containerImageSource: "",
+                replicas: 1,
+                envVars: ``,
+                useNetworkPolicy: true,
+                healthCheckPeriodSeconds: Constants.DEFAULT_HEALTH_CHECK_PERIOD_SECONDS,
+                healthCheckTimeoutSeconds: Constants.DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS,
+                healthCheckFailureThreshold: Constants.DEFAULT_HEALTH_CHECK_FAILURE_THRESHOLD,
+                securityContextFsGroup: 1000,
+            },
+            appDomains: [],
+            appVolumes: [{
+                size: 500,
+                containerMountPath: '/app/data/storage',
+                accessMode: 'ReadWriteOnce',
+                storageClassName: 'longhorn',
+                shareWithOtherApps: false,
+            }],
+            appFileMounts: [],
+        }],
+};
+
+
+export const postCreateDocmostAppTemplate = async (createdApps: AppExtendedModel[]): Promise<AppExtendedModel[]> => {
+
+    const createdPostgresApp = createdApps[0];
+    const createdRedisApp = createdApps[1];
+    const createdDocmostApp = createdApps[2];
+
+    if (!createdPostgresApp || !createdRedisApp || !createdDocmostApp) {
+        throw new Error('Created templates for PostgreSQL, Redis or Docmost not found.');
+    }
+
+    const redisConnectionInfo = AppTemplateUtils.getDatabaseModelFromApp(createdRedisApp);
+    const postgresConnectionInfo = AppTemplateUtils.getDatabaseModelFromApp(createdPostgresApp);
+
+    // Update Docmost envVars with correct connection URLs
+    createdDocmostApp.envVars = `APP_URL=http://localhost:3000
+DATABASE_URL=${postgresConnectionInfo.internalConnectionUrl}
+REDIS_URL=${redisConnectionInfo.internalConnectionUrl}
+${createdDocmostApp.envVars.split('\n').filter(line =>
+        !line.startsWith('APP_URL=') &&
+        !line.startsWith('DATABASE_URL=') &&
+        !line.startsWith('REDIS_URL=')
+    ).join('\n')}`;
+    NetworkPolicyTemplateUtils.allowAppConnection(createdDocmostApp, createdPostgresApp, 5432);
+    NetworkPolicyTemplateUtils.allowAppConnection(createdDocmostApp, createdRedisApp, 6379);
+    NetworkPolicyTemplateUtils.denyInternetAccess(createdPostgresApp);
+    NetworkPolicyTemplateUtils.denyInternetAccess(createdRedisApp);
+
+    return [createdPostgresApp, createdRedisApp, createdDocmostApp];
+};
