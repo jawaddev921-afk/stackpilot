@@ -1,0 +1,55 @@
+import { Constants } from "@/shared/utils/constants";
+import { AppTemplateModel } from "../../model/app-template.model";
+
+export const grafanaAppTemplate: AppTemplateModel = {
+    name: "Grafana",
+    description: 'An observability platform for dashboards, metrics, logs, traces, and alerting.',
+    websiteUrl: 'https://github.com/grafana/grafana',
+    iconName: 'grafana.svg',
+    templates: [{
+        inputSettings: [
+            {
+                key: "containerImageSource",
+                label: "Container Image",
+                value: "grafana/grafana:latest",
+                isEnvVar: false,
+                randomGeneratedIfEmpty: false,
+            },
+            {
+                key: "GF_SECURITY_ADMIN_USER",
+                label: "Admin Username",
+                value: "admin",
+                isEnvVar: true,
+                randomGeneratedIfEmpty: false,
+            },
+            {
+                key: "GF_SECURITY_ADMIN_PASSWORD",
+                label: "Admin Password",
+                value: "",
+                isEnvVar: true,
+                randomGeneratedIfEmpty: true,
+            },
+        ],
+        appModel: {
+            name: "Grafana",
+            appType: 'APP',
+            sourceType: 'CONTAINER',
+            containerImageSource: "",
+            replicas: 1,
+            envVars: ``,
+            useNetworkPolicy: true,
+            healthCheckPeriodSeconds: 15,
+            healthCheckTimeoutSeconds: 5,
+            healthCheckFailureThreshold: Constants.DEFAULT_HEALTH_CHECK_FAILURE_THRESHOLD,
+        },
+        appDomains: [],
+        appVolumes: [{
+            size: 200,
+            containerMountPath: '/var/lib/grafana',
+            accessMode: 'ReadWriteOnce',
+            storageClassName: 'longhorn',
+            shareWithOtherApps: false,
+        }],
+        appFileMounts: [],
+    }],
+};
