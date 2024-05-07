@@ -1,0 +1,105 @@
+import { Constants } from "@/shared/utils/constants";
+import { AppTemplateModel } from "../../model/app-template.model";
+import { AppExtendedModel } from "@/shared/model/app-extended.model";
+import { KubeObjectNameUtils } from "@/server/utils/kube-object-name.utils";
+import { NetworkPolicyTemplateUtils } from "../network-policy-template.utils";
+
+export const openwebuiAppTemplate: AppTemplateModel = {
+    name: "Open WebUI",
+    description: 'A self-hosted chat interface for working with language models and OpenAI-compatible APIs.',
+    websiteUrl: 'https://github.com/open-webui/open-webui',
+    iconName: 'openwebui.png',
+    templates: [{
+        // Ollama Backend
+        inputSettings: [
+            {
+                key: "containerImageSource",
+                label: "Container Image",
+                value: "ollama/ollama:latest",
+                isEnvVar: false,
+                randomGeneratedIfEmpty: false,
+            },
+        ],
+        appModel: {
+            name: "Ollama",
+            appType: 'APP',
+            sourceType: 'CONTAINER',
+            containerImageSource: "",
+            replicas: 1,
+            envVars: `OLLAMA_HOST=0.0.0.0
+OLLAMA_ORIGINS=*
+`,
+            useNetworkPolicy: true,
+            healthCheckPeriodSeconds: Constants.DEFAULT_HEALTH_CHECK_PERIOD_SECONDS,
+            healthCheckTimeoutSeconds: Constants.DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS,
+            healthCheckFailureThreshold: Constants.DEFAULT_HEALTH_CHECK_FAILURE_THRESHOLD,
+        },
+        appDomains: [],
+        appVolumes: [{
+            size: 10000,
+            containerMountPath: '/root/.ollama',
+            accessMode: 'ReadWriteOnce',
+            storageClassName: 'longhorn',
+            shareWithOtherApps: false,
+        }],
+        appFileMounts: [],
+    },
+    // Open WebUI Frontend
+    {
+        inputSettings: [
+            {
+                key: "containerImageSource",
+                label: "Container Image",
+                value: "ghcr.io/open-webui/open-webui:main",
+                isEnvVar: false,
+                randomGeneratedIfEmpty: false,
+            },
+            {
+                key: "WEBUI_SECRET_KEY",
+                label: "Secret Key",
+                value: "",
+                isEnvVar: true,
+                randomGeneratedIfEmpty: true,
+            },
+        ],
+        appModel: {
+            name: "Open WebUI",
+            appType: 'APP',
+            sourceType: 'CONTAINER',
+            containerImageSource: "",
+            replicas: 1,
+            envVars: ``,
+            useNetworkPolicy: true,
+            healthCheckPeriodSeconds: Constants.DEFAULT_HEALTH_CHECK_PERIOD_SECONDS,
+            healthCheckTimeoutSeconds: Constants.DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS,
+            healthCheckFailureThreshold: Constants.DEFAULT_HEALTH_CHECK_FAILURE_THRESHOLD,
+        },
+        appDomains: [],
+        appVolumes: [{
+            size: 2000,
+            containerMountPath: '/app/backend/data',
+            accessMode: 'ReadWriteOnce',
+            storageClassName: 'longhorn',
+            shareWithOtherApps: false,
+        }],
+        appFileMounts: [],
+    }]
+}
+
+
+export const postCreateOpenwebuiAppTemplate = async (createdApps: AppExtendedModel[]): Promise<AppExtendedModel[]> => {
+
+    const createdOllamaApp = createdApps[0];
+    const createdWebuiApp = createdApps[1];
+
+    if (!createdOllamaApp || !createdWebuiApp) {
+        throw new Error('Created templates for Ollama or Open WebUI not found.');
+    }
+
+    const ollamaAppInternalHostname = KubeObjectNameUtils.toServiceName(createdOllamaApp.id);
+
+    createdWebuiApp.envVars += `OLLAMA_BASE_URLS=http://${ollamaAppInternalHostname}:11434`;
+    NetworkPolicyTemplateUtils.allowAppConnection(createdWebuiApp, createdOllamaApp, 11434);
+
+    return [createdOllamaApp, createdWebuiApp]
+};
