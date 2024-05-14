@@ -1,0 +1,151 @@
+import { K3sReleaseResponseSchema, LonghornReleaseResponseSchema } from "@/shared/model/generated-zod/k3s-longhorn-release-schemas";
+import { z } from "zod";
+
+export interface StackPilotReleaseInfo {
+    version: string;
+    url: string;
+    publishedAt: string;
+    body: string;
+}
+
+export interface K3sReleaseInfo {
+    version: string;
+    channelUrl: string;
+}
+
+export interface LonghornReleaseInfo {
+    version: string;
+    yamlUrl: string;
+}
+
+export interface LonghornReleaseCatalog {
+    installRelease: LonghornReleaseInfo;
+    releases: LonghornReleaseInfo[];
+}
+
+interface ReleaseResponse {
+    prodInstallVersion: string;
+    canaryInstallVersion: string;
+}
+
+interface K3sReleaseResponse extends ReleaseResponse {
+    prod: K3sReleaseInfo[];
+    canary: K3sReleaseInfo[];
+}
+
+interface LonghornReleaseResponse extends ReleaseResponse {
+    prod: LonghornReleaseInfo[];
+    canary: LonghornReleaseInfo[];
+}
+
+class QsVersionInfoAdapter {
+
+    private readonly API_BASE_URL = 'https://get.stackpilot.dev';
+
+    private async getK3sVersioninfo(): Promise<K3sReleaseResponse> {
+        const response = await fetch(`${this.API_BASE_URL}/k3s-versions.json`, {
+            cache: 'no-cache',
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            }
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to fetch latest StackPilot K3s Prod version from API: HTTP ${response.status} ${response.statusText}`);
+        }
+        const reponseJson = await response.json();
+        return K3sReleaseResponseSchema.parse(reponseJson);
+    }
+
+    private async getLonghornVersioninfo(): Promise<LonghornReleaseResponse> {
+        const response = await fetch(`${this.API_BASE_URL}/longhorn-versions.json`, {
+            cache: 'no-cache',
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            }
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to fetch Longhorn version info from API: HTTP ${response.status} ${response.statusText}`);
+        }
+        const responseJson = await response.json();
+        return LonghornReleaseResponseSchema.parse(responseJson);
+    }
+
+    public async getProdK3sReleaseInfo(): Promise<K3sReleaseInfo[]> {
+        const releaseInfo = await this.getK3sVersioninfo();
+        return releaseInfo.prod;
+    }
+
+    public async getCanaryK3sReleaseInfo(): Promise<K3sReleaseInfo[]> {
+        const releaseInfo = await this.getK3sVersioninfo();
+        return releaseInfo.canary;
+    }
+
+
+    public async getLonghornReleaseCatalog(useCanary: boolean): Promise<LonghornReleaseCatalog> {
+        const releaseInfo = await this.getLonghornVersioninfo();
+        const releases = useCanary ? releaseInfo.canary : releaseInfo.prod;
+        const installVersion = useCanary ? releaseInfo.canaryInstallVersion : releaseInfo.prodInstallVersion;
+        const installRelease = releases.find((release) => release.version === installVersion);
+        if (!installRelease) {
+            throw new Error(`Longhorn install version ${installVersion} is not present in the selected release channel.`);
+        }
+        return { installRelease, releases };
+    }
+
+    public async getLatestStackPilotVersion(instanceId?: string): Promise<StackPilotReleaseInfo> {
+        const url = new URL(`${this.API_BASE_URL}/versioninfo.json`);
+        if (instanceId) {
+            url.searchParams.append('instanceId', instanceId);
+        }
+        const response = await fetch(url.toString(), {
+            cache: 'no-cache',
+            method: 'GET',
+            headers: {
+
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch latest StackPilot version: HTTP ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        // verify response of server
+        const stackPilotReleaseInfoSchema = z.object({
+            tag_name: z.string(),
+            html_url: z.string().url(),
+            published_at: z.string(),
+            body: z.string()
+        });
+
+        const parsedData = stackPilotReleaseInfoSchema.safeParse(data);
+        if (!parsedData.success) {
+            console.error("Failed to parse latest StackPilot version info:", data, parsedData.error);
+            throw new Error("Failed to parse latest StackPilot version info");
+        }
+
+        return {
+            version: parsedData.data.tag_name,
+            url: parsedData.data.html_url,
+            publishedAt: parsedData.data.published_at,
+            body: parsedData.data.body
+        };
+
+        /* example:
+        {
+            "tag_name": "0.0.11",
+            "html_url": "https://github.com/jawaddev921-afk/stackpilot/releases/tag/0.0.11",
+            "published_at": "2026-04-22T08:11:12Z",
+            "body": "## What’s New\r\n* Added a queue mechanism to the build process to prevent multiple parallel builds from overloading a StackPilot node\r\n* Added placement options for build jobs in the StackPilot settings\r\n* Added an overview page for all recent builds\r\n* Kubernetes events are now displayed in the deployment logs\r\n* Fixed an error on the backups page that prevented it from loading when a backup location was unreachable\r\n* Optimized build pipelines and devcontainer setup\r\n* Various smaller fixes and improvements\r\n\r\n## What's Changed\r\n* chore: enhance devcontainer setup for local k3s development and updated contribution guidelines by @jawaddev921-afk in https://github.com/jawaddev921-afk/stackpilot/pull/81\r\n* fix: implement error handling for external data fetching in backups and monitoring page by @jawaddev921-afk in https://github.com/jawaddev921-afk/stackpilot/pull/84\r\n* Feat/placement options for build containers in cluster by @jawaddev921-afk in https://github.com/jawaddev921-afk/stackpilot/pull/85\r\n* chore: optimized arm build-and-push on canary and prod release for stackpilot image by @jawaddev921-afk in https://github.com/jawaddev921-afk/stackpilot/pull/86\r\n* Feat/build process optimizations by @jawaddev921-afk in https://github.com/jawaddev921-afk/stackpilot/pull/87\r\n* fix: replaced libredesk logo by @jawaddev921-afk in https://github.com/jawaddev921-afk/stackpilot/pull/88\r\n\r\n\r\n**Full Changelog**: https://github.com/jawaddev921-afk/stackpilot/compare/0.0.9...0.0.11"
+        }*/
+    }
+}
+
+export const qsVersionInfoAdapter = new QsVersionInfoAdapter();
