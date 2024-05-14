@@ -1,22 +1,25 @@
 # StackPilot
 
-StackPilot is a self-hosted Platform-as-a-Service for deploying and managing containerized applications on your own servers.
+StackPilot is a self-hosted Platform-as-a-Service for deploying and managing containerized applications and databases on your own servers.
 
 ## About
 
-StackPilot is a web dashboard on top of a lightweight Kubernetes (k3s) cluster. You create a project, add apps that come from a Git repository or a container image, and the platform builds, deploys and exposes them.
+StackPilot is a web dashboard on top of a lightweight Kubernetes (k3s) cluster. You create a project, add apps from a Git repository, a container image or a ready-made template, and the platform builds, deploys, exposes and backs them up.
 
-## Current Features
+## Features
 
-- **Projects and apps** - group apps into projects; each project gets its own Kubernetes namespace.
-- **Git and image sources** - deploy from a public or private Git repository or from an existing container image.
-- **In-cluster builds** - images are built from a Dockerfile as Kubernetes jobs and pushed to a registry inside the cluster.
-- **Deployments** - replicas, CPU/memory limits and environment variables per app.
-- **Domains** - Traefik ingresses per hostname with optional HTTPS redirect.
-- **Volumes** - persistent volumes per app.
-- **Live logs** - streamed build logs and container logs in the browser.
-- **Deployment history** - past builds and deployments with status badges.
-- **Authentication** - email/password login with optional TOTP two-factor authentication.
+- **Apps from Git or images** - in-cluster Dockerfile builds, private registry credentials and deploy webhooks for CI.
+- **Templates** - one-click PostgreSQL, MySQL, MariaDB, MongoDB and Redis databases plus dozens of popular self-hosted apps.
+- **Domains and TLS** - Traefik ingresses with Let's Encrypt certificates and HTTPS redirects; optional HTTP basic auth per app.
+- **Storage** - persistent volumes, config file mounts, volume upload and a temporary file browser.
+- **Backups** - scheduled volume backups to S3-compatible storage with retention and restore.
+- **Database tools** - connection details and on-demand DbGate, phpMyAdmin or pgAdmin.
+- **Operations** - live build and container logs, a web terminal, CPU/memory/disk monitoring and cluster node overview.
+- **Team access** - users, user groups with project- and app-level permissions, and TOTP two-factor authentication.
+
+## Installation on a Server
+
+The scripts in [`setup/`](setup) install k3s, Longhorn and StackPilot on a fresh Linux server and join additional nodes to the cluster.
 
 ## Development
 
@@ -30,11 +33,7 @@ yarn prisma-deploy
 yarn dev
 ```
 
-Run the unit tests with:
-
-```bash
-yarn test
-```
+Run the unit tests with `yarn test`. Build the container image with `docker build -t stackpilot .`.
 
 ## License
 
