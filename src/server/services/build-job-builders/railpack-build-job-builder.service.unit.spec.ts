@@ -1,0 +1,82 @@
+import railpackBuildJobBuilder, { RAILPACK_FRONTEND_IMAGE } from "./railpack-build-job-builder.service";
+
+vi.mock('@/server/adapter/kubernetes-api.adapter', () => ({ default: {} }));
+
+describe('RailpackBuildJobBuilder', () => {
+    it('builds a Railpack job with queue init, prepare init, shared volume, and frontend image', async () => {
+        const job = await railpackBuildJobBuilder.buildJobDefinition({
+            workload: {
+                id: 'app-1',
+                projectId: 'project-1',
+                gitUrl: 'https://github.com/example/repo.git',
+                gitBranch: 'main',
+            } as any,
+            workloadType: 'app',
+            buildName: 'build-1',
+            deploymentId: 'deployment-1',
+            latestRemoteGitHash: 'abc123',
+            latestRemoteGitCommitMessage: 'feat: test',
+            queuedAt: '123',
+            maxParallelBuilds: 2,
+        });
+
+        const initContainers = job.spec?.template?.spec?.initContainers ?? [];
+        const buildContainer = job.spec?.template?.spec?.containers[0]!;
+
+        expect(job.metadata?.annotations?.['qs-build-method']).toBe('RAILPACK');
+        expect(job.metadata?.annotations?.['qs-is-rollback']).toBeUndefined();
+        expect(job.spec?.template?.metadata?.annotations?.['qs-deplyoment-id']).toBe('deployment-1');
+        expect(initContainers.map((container) => container.name)).toEqual([
+            'build-queue-init',
+            'build-git-init',
+            'railpack-prepare-init',
+        ]);
+        expect(job.spec?.template?.spec?.volumes).toEqual([
+            expect.objectContaining({
+                name: 'build-workspace',
+                emptyDir: {},
+            }),
+        ]);
+        expect(buildContainer.args).toEqual(expect.arrayContaining([
+            'gateway.v0',
+            `source=${RAILPACK_FRONTEND_IMAGE}`,
+            'context=/workspace/source',
+            'dockerfile=/workspace/plan',
+        ]));
+        expect(buildContainer.args).toEqual(expect.arrayContaining([
+            expect.stringContaining('"name=registry-svc.registry-and-build.svc.cluster.local:5000/app-1:latest,registry-svc.registry-and-build.svc.cluster.local:5000/app-1:abc123"'),
+        ]));
+
+        const prepareContainer = initContainers.find((container) => container.name === 'railpack-prepare-init')!;
+        expect(RAILPACK_FRONTEND_IMAGE).toBe('ghcr.io/railwayapp/railpack-frontend:v0.39.0');
+        expect(prepareContainer.env).toContainEqual({ name: 'RAILPACK_VERSION', value: '0.39.0' });
+        expect(prepareContainer.args?.[0]).toContain('RAILPACK_VERSION="0.39.0"');
+        expect(prepareContainer.env ?? []).not.toContainEqual(expect.objectContaining({ name: 'GIT_URL' }));
+        expect(prepareContainer.args?.[0]).not.toContain('git clone');
+    });
+
+    it('tags only the immutable commit tag when building a rollback', async () => {
+        const job = await railpackBuildJobBuilder.buildJobDefinition({
+            workload: {
+                id: 'app-1',
+                projectId: 'project-1',
+                gitUrl: 'https://github.com/example/repo.git',
+                gitBranch: 'main',
+            } as any,
+            workloadType: 'app',
+            buildName: 'build-1',
+            deploymentId: 'deployment-1',
+            latestRemoteGitHash: 'abc123',
+            latestRemoteGitCommitMessage: 'old commit',
+            queuedAt: '123',
+            maxParallelBuilds: 2,
+            isRollback: true,
+        });
+
+        expect(job.metadata?.annotations?.['qs-is-rollback']).toBe('true');
+        expect(job.spec?.template?.metadata?.annotations?.['qs-is-rollback']).toBe('true');
+        const imageOutputArg = job.spec?.template?.spec?.containers[0]?.args?.find((arg) => arg.includes('type=image'));
+        expect(imageOutputArg).toContain('registry-svc.registry-and-build.svc.cluster.local:5000/app-1:abc123');
+        expect(imageOutputArg).not.toContain(':latest');
+    });
+});
