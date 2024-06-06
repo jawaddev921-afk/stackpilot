@@ -1,21 +1,20 @@
 # StackPilot
 
-StackPilot is a self-hosted Platform-as-a-Service for deploying and managing containerized applications and databases on your own servers.
+StackPilot is a self-hosted Platform-as-a-Service for deploying containerized applications, databases and AI coding agents on your own servers.
 
 ## About
 
-StackPilot is a web dashboard on top of a lightweight Kubernetes (k3s) cluster. You create a project, add apps from a Git repository, a container image or a template, and the platform builds, deploys, secures and backs them up. Everything you can do in the dashboard can also be automated through a REST API or an MCP server.
+StackPilot is a web dashboard on top of a lightweight Kubernetes (k3s) cluster. Projects contain apps built from Git or container images and, since this release, AI agents that run in isolated sandboxes and talk to models through an LLM gateway. Everything can be automated through a REST API or an MCP server.
 
 ## Features
 
-- **Flexible builds** - Dockerfile or Railpack builds in the cluster, SSH deploy keys for private repositories and a guided source wizard.
-- **Templates** - one-click databases and dozens of popular self-hosted applications.
-- **Networking** - domains with Let's Encrypt, node ports, per-app network policies, Traefik client IP propagation and wildcard DNS hostnames.
-- **Reliability** - HTTP/TCP health checks, rollbacks, realtime pod status and Kubernetes events per app.
-- **Storage and backups** - storage classes, shared volumes, volume and native database backups (PostgreSQL, MariaDB/MySQL, MongoDB) to S3, plus platform database backups.
-- **Operations** - live logs, web terminal, monitoring, global builds overview, platform updates and k3s upgrades from the UI.
-- **Team access** - user groups with project- and app-level permissions and TOTP two-factor authentication.
-- **Automation** - personal API keys, a versioned REST API with OpenAPI docs and a Model Context Protocol endpoint.
+- **Apps** - Dockerfile or Railpack builds, SSH deploy keys, templates, domains with Let's Encrypt, node ports, health checks and rollbacks.
+- **AI agents** - agents created from harness templates, connected to LiteLLM gateways with model aliases and rate limits, running in agent-sandbox sandboxes with their own domains, volumes, config files, environment and egress rules.
+- **Storage and backups** - storage classes, shared volumes, volume and database backups to S3 and platform database backups.
+- **Networking** - per-app network policies, Traefik client IP propagation and wildcard DNS hostnames.
+- **Operations** - live logs, web terminal, monitoring, builds overview, platform updates and k3s upgrades.
+- **Access control** - user groups with project, app and agent permissions, TOTP two-factor authentication, SSO providers (GitHub, Google, Microsoft Entra) and API-only users.
+- **Automation** - personal API keys, a REST API for projects, apps and agents, and a Model Context Protocol endpoint.
 
 ## Installation on a Server
 
