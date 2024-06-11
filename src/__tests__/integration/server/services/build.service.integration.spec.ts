@@ -1,0 +1,384 @@
+// @vitest-environment node
+
+import mockNextJsCaching from '@/__tests__/nextjs-cache.utils';
+mockNextJsCaching();
+
+vi.mock('@/server/adapter/kubernetes-api.adapter', () => ({ default: {} }));
+
+import { getPrivateGitSshKeyFromEnv, GitTestRepositories } from '@/__tests__/git-test-repositories.utils';
+import { createK3sTestContext, deployRegistry } from '@/__tests__/k3s-test.utils';
+import { mockPathUtilsForTests } from '@/__tests__/path-test.utils';
+import { createPrismaTestContext } from '@/__tests__/prisma-test.utils';
+import dataAccess from '@/server/adapter/db.client';
+import buildService from '@/server/services/build.service';
+import deploymentService from '@/server/services/deployment.service';
+import deploymentLogService from '@/server/services/deployment-logs.service';
+import ingressService from '@/server/services/ingress.service';
+import podService from '@/server/services/pod.service';
+import { BUILD_NAMESPACE } from '@/server/services/registry.service';
+import { CryptoUtils } from '@/server/utils/crypto.utils';
+import { PathUtils } from '@/server/utils/path.utils';
+import { AppExtendedModel } from '@/shared/model/app-extended.model';
+import { AppBuildMethod } from '@/shared/model/app-source-info.model';
+import { JsFramework, jsFrameworkPresets } from '@/shared/model/js-framework.model';
+import fs from 'node:fs/promises';
+
+
+describe('build.service integration', () => {
+    setupBuildServiceIntegration('build-service');
+
+    it('fails to build a docker image from an SSH repository without ssh key auth', async () => {
+        await runBuildAndAssertGitFailure({
+            appIdPrefix: 'dockerfile-ssh-public',
+            projectIdPrefix: 'proj-dockerfile-ssh-public',
+            sourceType: 'GIT_SSH',
+            buildMethod: 'DOCKERFILE',
+            gitUrl: GitTestRepositories.publicSshUrl,
+            expectedLogLine: 'Dockerfile path: ./Dockerfile',
+        });
+    }, 420_000);
+
+    it.skipIf(!getPrivateGitSshKeyFromEnv())('builds and pushes a docker image from the private SSH repository', async () => {
+        await runBuildAndAssert({
+            appIdPrefix: 'dockerfile-ssh-private',
+            projectIdPrefix: 'proj-dockerfile-ssh-private',
+            sourceType: 'GIT_SSH',
+            buildMethod: 'DOCKERFILE',
+            gitUrl: GitTestRepositories.privateSshUrl,
+            expectedLogLine: 'Dockerfile path: ./Dockerfile',
+            privateSshKey: getRequiredPrivateGitSshKey(),
+        });
+    }, 420_000);
+
+    it.skipIf(!getPrivateGitSshKeyFromEnv())('builds and pushes a railpack image from the private SSH repository', async () => {
+        await runBuildAndAssert({
+            appIdPrefix: 'railpack-ssh-private',
+            projectIdPrefix: 'proj-railpack-ssh-private',
+            sourceType: 'GIT_SSH',
+            buildMethod: 'RAILPACK',
+            gitUrl: GitTestRepositories.privateSshUrl,
+            expectedLogLine: 'Railpack build will run queue wait, prepare step, and BuildKit build in sequence.',
+            privateSshKey: getRequiredPrivateGitSshKey(),
+        });
+    }, 420_000);
+
+
+    it('builds and pushes a docker image from the public HTTPS repository', async () => {
+        await runBuildAndAssert({
+            appIdPrefix: 'dockerfile-http',
+            projectIdPrefix: 'proj-dockerfile-http',
+            sourceType: 'GIT',
+            buildMethod: 'DOCKERFILE',
+            gitUrl: GitTestRepositories.publicHttpsUrl,
+            expectedLogLine: 'Dockerfile path: ./Dockerfile',
+        });
+    }, 420_000);
+
+    it('builds and pushes a railpack image from the public HTTPS repository', async () => {
+        await runBuildAndAssert({
+            appIdPrefix: 'railpack-http',
+            projectIdPrefix: 'proj-railpack-http',
+            sourceType: 'GIT',
+            buildMethod: 'RAILPACK',
+            gitUrl: GitTestRepositories.publicHttpsUrl,
+            expectedLogLine: 'Railpack build will run queue wait, prepare step, and BuildKit build in sequence.',
+        });
+    }, 420_000);
+
+    it('builds and pushes the modern-beer-app Next.js repository with framework overrides', async () => {
+        await runBuildAndAssert({
+            appIdPrefix: 'framework-nextjs-modern-beer',
+            projectIdPrefix: 'proj-framework-nextjs-modern-beer',
+            sourceType: 'GIT',
+            buildMethod: 'FRAMEWORK',
+            gitUrl: 'https://github.com/jawaddev921-afk/modern-beer-app.git',
+            gitBranch: 'main',
+            framework: 'NEXTJS',
+            installCommand: 'pnpm install --no-frozen-lockfile',
+            buildCommand: 'pnpm run build',
+            runCommand: 'pnpm run start',
+            rootDirectory: './',
+            outputDirectory: '.next',
+            nodeVersion: '22',
+            expectedLogLine: 'Framework build (NEXTJS) with Railpack prepare, build and start overrides.',
+        });
+    }, 420_000);
+
+    describe('framework dummy apps', () => {
+        const frameworks: { framework: JsFramework; rootDirectory: string }[] = [
+            { framework: 'NEXTJS', rootDirectory: './nextjs' },
+            { framework: 'REACT', rootDirectory: './react' },
+            { framework: 'ANGULAR', rootDirectory: './angular' },
+            { framework: 'NUXT', rootDirectory: './nuxt' },
+            { framework: 'ASTRO', rootDirectory: './astro' },
+            { framework: 'SVELTEKIT', rootDirectory: './sveltekit' },
+        ];
+
+        it('builds and deploys one randomly selected framework dummy app', async () => {
+            const { framework, rootDirectory } = frameworks[Math.floor(Math.random() * frameworks.length)];
+            const preset = jsFrameworkPresets[framework];
+            console.info(`Selected framework integration test: ${framework}`);
+
+            await runBuildDeployAndAssert({
+                appIdPrefix: `framework-${framework.toLowerCase()}`,
+                projectIdPrefix: `proj-framework-${framework.toLowerCase()}`,
+                sourceType: 'GIT',
+                buildMethod: 'FRAMEWORK',
+                gitUrl: GitTestRepositories.dummyAppsHttpsUrl,
+                gitBranch: 'main',
+                framework,
+                installCommand: preset.installCommand,
+                buildCommand: preset.buildCommand,
+                runCommand: preset.runCommand,
+                rootDirectory,
+                outputDirectory: preset.outputDirectory,
+                expectedLogLine: `Framework build (${framework}) with Railpack prepare, build and start overrides.`,
+            });
+        }, 480_000);
+    });
+});
+
+export type BuildIntegrationInput = {
+    appIdPrefix: string;
+    projectIdPrefix: string;
+    buildMethod: AppBuildMethod;
+    sourceType: 'GIT' | 'GIT_SSH';
+    gitUrl: string;
+    gitBranch?: string;
+    expectedLogLine: string;
+    privateSshKey?: string;
+    framework?: JsFramework;
+    installCommand?: string;
+    buildCommand?: string;
+    runCommand?: string;
+    rootDirectory?: string;
+    outputDirectory?: string;
+    nodeVersion?: string;
+};
+
+export function setupBuildServiceIntegration(label: string) {
+    const { originalInternalDataRoot, originalTempDataRoot } = mockPathUtilsForTests();
+    createK3sTestContext();
+    createPrismaTestContext(label);
+
+    beforeEach(() => {
+        process.env.NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET ?? 'test-nextauth-secret';
+        vi.clearAllMocks();
+    });
+
+    afterAll(() => {
+        if (originalInternalDataRoot) {
+            Object.defineProperty(PathUtils, 'internalDataRoot', originalInternalDataRoot);
+        }
+        if (originalTempDataRoot) {
+            Object.defineProperty(PathUtils, 'tempDataRoot', originalTempDataRoot);
+        }
+        vi.restoreAllMocks();
+    });
+}
+
+export async function runBuildAndAssert(input: BuildIntegrationInput) {
+    await deployRegistry();
+
+    const suffix = Date.now();
+    const app = createBuildApp({
+        ...input,
+        id: `${input.appIdPrefix}-${suffix}`,
+        projectId: `${input.projectIdPrefix}-${suffix}`,
+    });
+
+    if (input.privateSshKey) {
+        await persistAppAndSshKey(app, input.privateSshKey);
+    }
+
+    const deploymentId = `dep-${suffix}`;
+    const [buildJobName, gitCommitHash, gitCommitMessage, shouldDeployImmediately] =
+        await deploymentLogService.catchErrosAndLog(deploymentId, async () => buildService.buildApp(deploymentId, app, true));
+
+    expect(shouldDeployImmediately).toBe(false);
+    expect(buildJobName).toMatch(new RegExp(`^build-${app.id}`));
+    expect(gitCommitHash).toMatch(/^[0-9a-f]{40}$/);
+    expect(gitCommitMessage.length).toBeGreaterThan(0);
+
+    await expect.poll(async () => {
+        return await buildService.getJobStatus(buildJobName);
+    }, {
+        timeout: 300_000,
+        interval: 2_000,
+    }).toBe('SUCCEEDED');
+
+    const registryPods = await podService.getPodsForApp(BUILD_NAMESPACE, 'registry');
+    expect(registryPods).toHaveLength(1);
+
+    await podService.runCommandInPod(
+        BUILD_NAMESPACE,
+        registryPods[0].podName,
+        registryPods[0].containerName,
+        [
+            'sh',
+            '-c',
+            `test -f /var/lib/registry/docker/registry/v2/repositories/${app.id}/_manifests/tags/latest/current/link`,
+        ],
+    );
+
+    const builds = await buildService.getBuildsForApp(app.id);
+    expect(builds[0]).toMatchObject({
+        name: buildJobName,
+        status: 'SUCCEEDED',
+        buildMethod: input.buildMethod,
+        gitCommit: gitCommitHash,
+    });
+
+    const logFile = await fs.readFile(PathUtils.appDeploymentLogFile(deploymentId), 'utf-8');
+    expect(logFile).toContain(`Selected build method: ${input.buildMethod}`);
+    expect(logFile).toContain(input.expectedLogLine);
+    expect(logFile).toContain(`Build job ${buildJobName} scheduled successfully`);
+
+    return { app, buildJobName, gitCommitHash, gitCommitMessage };
+}
+
+async function runBuildDeployAndAssert(input: BuildIntegrationInput) {
+    const { app, buildJobName, gitCommitHash, gitCommitMessage } = await runBuildAndAssert(input);
+    const deploymentId = `dep-deploy-${app.id}`;
+    const ingressSpy = vi.spyOn(ingressService, 'createOrUpdateIngressForApp').mockResolvedValue();
+
+    try {
+        await deploymentLogService.catchErrosAndLog(deploymentId, async () => {
+            await deploymentService.createDeployment(deploymentId, app, {
+                buildJobName,
+                gitCommitHash,
+                gitCommitMessage,
+                buildMethod: input.buildMethod,
+            });
+        });
+
+        await expect.poll(async () => {
+            return await deploymentService.getDeploymentStatus(app.projectId, app.id);
+        }, {
+            timeout: 180_000,
+            interval: 2_000,
+        }).toBe('DEPLOYED');
+
+        const deployment = await deploymentService.getDeployment(app.projectId, app.id);
+        expect(deployment).toMatchObject({
+            metadata: { name: app.id },
+            spec: {
+                replicas: 1,
+                template: {
+                    metadata: {
+                        annotations: expect.objectContaining({
+                            buildJobName,
+                            'qs-build-method': 'FRAMEWORK',
+                            'qs-git-commit': gitCommitHash,
+                        }),
+                    },
+                },
+            },
+        });
+    } finally {
+        ingressSpy.mockRestore();
+    }
+}
+
+export async function runBuildAndAssertGitFailure(input: BuildIntegrationInput) {
+    await deployRegistry();
+
+    const suffix = Date.now();
+    const app = createBuildApp({
+        ...input,
+        id: `${input.appIdPrefix}-${suffix}`,
+        projectId: `${input.projectIdPrefix}-${suffix}`,
+    });
+
+    const deploymentId = `dep-${suffix}`;
+    await expect(deploymentLogService.catchErrosAndLog(deploymentId, async () => buildService.buildApp(deploymentId, app, true)))
+        .rejects
+        .toThrow('Git: SSH host key verification failed.');
+
+    const builds = await buildService.getBuildsForApp(app.id);
+    expect(builds).toHaveLength(0);
+}
+
+export function getRequiredPrivateGitSshKey() {
+    const privateSshKey = getPrivateGitSshKeyFromEnv();
+    if (!privateSshKey) {
+        throw new Error('Missing private SSH key for integration test.');
+    }
+    return privateSshKey;
+}
+
+function createBuildApp(input: BuildIntegrationInput & { id: string; projectId: string }): AppExtendedModel {
+    return {
+        id: input.id,
+        name: input.id,
+        appType: 'APP',
+        projectId: input.projectId,
+        sourceType: input.sourceType,
+        buildMethod: input.buildMethod,
+        dockerfilePath: './Dockerfile',
+        gitUrl: input.gitUrl,
+        gitBranch: input.gitBranch ?? GitTestRepositories.branch,
+        framework: input.framework,
+        installCommand: input.installCommand,
+        buildCommand: input.buildCommand,
+        runCommand: input.runCommand,
+        rootDirectory: input.rootDirectory,
+        outputDirectory: input.outputDirectory,
+        nodeVersion: input.nodeVersion,
+        replicas: 1,
+        envVars: '',
+        buildArgs: '',
+        useNetworkPolicy: true,
+        healthCheckPeriodSeconds: 15,
+        healthCheckTimeoutSeconds: 5,
+        healthCheckFailureThreshold: 3,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        project: {
+            id: input.projectId,
+            name: input.projectId,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        },
+        appDomains: [],
+        appNodePorts: [],
+        appFileMounts: [],
+        appVolumes: [],
+        appBasicAuths: [],
+    };
+}
+
+async function persistAppAndSshKey(app: AppExtendedModel, privateSshKey: string) {
+    await dataAccess.client.project.create({
+        data: {
+            id: app.projectId,
+            name: app.project.name,
+        },
+    });
+    await dataAccess.client.app.create({
+        data: {
+            id: app.id,
+            name: app.name,
+            appType: app.appType,
+            projectId: app.projectId,
+            sourceType: app.sourceType,
+            buildMethod: app.buildMethod,
+            gitUrl: app.gitUrl,
+            gitBranch: app.gitBranch,
+            dockerfilePath: app.dockerfilePath,
+            replicas: app.replicas,
+            envVars: app.envVars,
+            useNetworkPolicy: app.useNetworkPolicy,
+            healthCheckPeriodSeconds: app.healthCheckPeriodSeconds,
+            healthCheckTimeoutSeconds: app.healthCheckTimeoutSeconds,
+            healthCheckFailureThreshold: app.healthCheckFailureThreshold,
+        },
+    });
+    await dataAccess.client.appGitSshKey.create({
+        data: {
+            appId: app.id,
+            publicKey: 'ssh-ed25519 integration-test-placeholder',
+            encryptedPrivateKey: CryptoUtils.encrypt(privateSshKey),
+        },
+    });
+}
